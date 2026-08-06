@@ -236,6 +236,7 @@ jobs:
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup default "$RUST_TOOLCHAIN"
           rustup target add aarch64-apple-darwin --toolchain "$RUST_TOOLCHAIN"
+          rustup component add rustfmt clippy --toolchain "$RUST_TOOLCHAIN"
           [[ "$(rustc -vV | sed -n 's/^host: //p')" == "aarch64-apple-darwin" ]]
 
       - uses: actions/cache@v4
