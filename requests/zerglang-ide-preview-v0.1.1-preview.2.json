@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "product": "ZergLang IDE",
+  "channel": "preview",
+  "version": "0.1.1-preview.2",
+  "release_tag": "zerglang-ide-preview-v0.1.1-preview.2",
+  "source_repository": "Epoch-ML/zerg",
+  "source_sha": "6452bb5a63cfd94d5f60392fe470bad34892905a",
+  "source_ref": "refs/tags/zerglang-ide-preview-v0.1.1-preview.2",
+  "requested_at": "2026-08-06T03:19:38.636Z"
+}
