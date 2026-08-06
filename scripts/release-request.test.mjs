@@ -131,3 +131,21 @@ test("checks out only the requested source SHA instead of all monorepo refs", as
   assert.ok(commitFetchIndex > initIndex, "release checkout must fetch only the requested SHA");
   assert.ok(tagFetchIndex > commitFetchIndex, "release checkout must fetch only its matching tag");
 });
+
+test("installs Rust quality components before enforcing them", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const componentIndex = workflow.indexOf(
+    'rustup component add rustfmt clippy --toolchain "$RUST_TOOLCHAIN"',
+  );
+  const formatIndex = workflow.indexOf(
+    "cargo fmt --manifest-path src-tauri/Cargo.toml -- --check",
+  );
+  const clippyIndex = workflow.indexOf("cargo clippy \\");
+
+  assert.ok(componentIndex >= 0, "release runner must provision rustfmt and clippy");
+  assert.ok(formatIndex > componentIndex, "rustfmt must be installed before its gate runs");
+  assert.ok(clippyIndex > componentIndex, "clippy must be installed before its gate runs");
+});
