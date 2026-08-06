@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { validateReleaseRequest } from "./release-request.mjs";
@@ -111,4 +112,22 @@ test("rejects invalid request timestamps", () => {
     () => validateReleaseRequest(request({ requested_at: "yesterday" })),
     /requested_at must be an ISO-8601 UTC timestamp/,
   );
+});
+
+test("checks out only the requested source SHA instead of all monorepo refs", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const initIndex = workflow.indexOf("git init --ref-format=reftable source");
+  const commitFetchIndex = workflow.indexOf(
+    'git -C source fetch --no-tags --depth=1 origin "$EXPECTED_SHA"',
+  );
+  const tagFetchIndex = workflow.indexOf(
+    'git -C source fetch --no-tags --depth=1 origin "$EXPECTED_REF:$EXPECTED_REF"',
+  );
+
+  assert.ok(initIndex >= 0, "release checkout must initialize an isolated source repository");
+  assert.ok(commitFetchIndex > initIndex, "release checkout must fetch only the requested SHA");
+  assert.ok(tagFetchIndex > commitFetchIndex, "release checkout must fetch only its matching tag");
 });
