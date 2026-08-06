@@ -171,14 +171,38 @@ jobs:
             fi
           done
 
-      - uses: actions/checkout@v4
-        with:
-          repository: Epoch-ML/zerg
-          ref: ${{ needs.validate.outputs.source_sha }}
-          fetch-depth: 0
-          persist-credentials: false
-          ssh-key: ${{ secrets.ZERG_SOURCE_DEPLOY_KEY }}
-          path: source
+      - name: Check out the exact source commit and tag
+        env:
+          EXPECTED_REF: ${{ needs.validate.outputs.source_ref }}
+          EXPECTED_SHA: ${{ needs.validate.outputs.source_sha }}
+          SOURCE_DEPLOY_KEY: ${{ secrets.ZERG_SOURCE_DEPLOY_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_path="$RUNNER_TEMP/zerglang-source-deploy-key"
+          known_hosts_path="$RUNNER_TEMP/zerglang-github-known-hosts"
+          github_meta_path="$RUNNER_TEMP/zerglang-github-meta.json"
+          cleanup() {
+            rm -f "$key_path" "$known_hosts_path" "$github_meta_path"
+          }
+          trap cleanup EXIT
+
+          umask 077
+          printf '%s\n' "$SOURCE_DEPLOY_KEY" >"$key_path"
+          curl --fail --silent --show-error --location --retry 3 \
+            --proto '=https' --tlsv1.2 \
+            https://api.github.com/meta >"$github_meta_path"
+          jq -er \
+            '.ssh_keys[] | select(startswith("ssh-ed25519 ")) | "github.com " + .' \
+            "$github_meta_path" >"$known_hosts_path"
+          ssh-keygen -F github.com -f "$known_hosts_path" >/dev/null
+
+          export GIT_SSH_COMMAND="ssh -i $key_path -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts_path"
+          git init --ref-format=reftable source
+          git -C source remote add origin git@github.com:Epoch-ML/zerg.git
+          git -C source fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
+          git -C source fetch --no-tags --depth=1 origin "$EXPECTED_REF:$EXPECTED_REF"
+          git -C source checkout --detach "$EXPECTED_SHA"
 
       - name: Verify source commit and release tag
         working-directory: source
