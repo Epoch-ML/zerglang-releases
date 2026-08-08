@@ -48,7 +48,28 @@ function healthyState(workflowState = "disabled_manually") {
   return {
     release: {
       immutableReleases: { enabled: true },
-      pages: { https_enforced: true, build_type: "workflow" },
+      pages: {
+        https_enforced: true,
+        build_type: "workflow",
+        html_url: "https://epoch-ml.github.io/zerglang-releases/",
+        public: true,
+      },
+      feedBranch: {
+        name: "release-data",
+        sha: "a".repeat(40),
+        tree_sha: "b".repeat(40),
+        truncated: false,
+        entries: [
+          { path: "site", mode: "040000", type: "tree" },
+          { path: "site/.nojekyll", mode: "100644", type: "blob" },
+          { path: "site/index.html", mode: "100644", type: "blob" },
+          {
+            path: "site/preview/latest.json",
+            mode: "100644",
+            type: "blob",
+          },
+        ],
+      },
       workflows: [
         {
           path: ".github/workflows/release.yml",
@@ -200,13 +221,77 @@ test("fails closed on mutable releases, unsafe Pages, credentials, or missing ru
   );
 });
 
+test("requires the canonical public Pages origin and a data-only feed branch", () => {
+  const state = healthyState();
+  state.release.pages.html_url = "https://example.invalid/zerglang-releases/";
+  state.release.feedBranch.entries.push({
+    path: "scripts/pulled-policy.mjs",
+    mode: "100755",
+    type: "blob",
+  });
+
+  assert.deepEqual(
+    auditRepositoryState(state, { phase: "cutover" }).errors,
+    [
+      {
+        code: "feed-branch-contract",
+        message: "release-data must contain only a bounded site tree",
+      },
+      {
+        code: "pages-contract",
+        message: "Pages must publish the canonical public HTTPS origin",
+      },
+    ],
+  );
+
+  state.release.pages = {
+    https_enforced: true,
+    build_type: "workflow",
+    html_url: "https://epoch-ml.github.io/zerglang-releases/",
+    public: true,
+  };
+  state.release.feedBranch = null;
+  assert.deepEqual(
+    auditRepositoryState(state, { phase: "cutover" }).errors.map(
+      ({ code }) => code,
+    ),
+    ["feed-branch-contract"],
+  );
+});
+
 test("collects settings through one injected read-only HTTP boundary", async () => {
   const calls = [];
   const responses = new Map([
     ["Epoch-ML/zerglang-releases:immutable-releases", { enabled: true }],
     [
       "Epoch-ML/zerglang-releases:pages",
-      { https_enforced: true, build_type: "workflow" },
+      {
+        https_enforced: true,
+        build_type: "workflow",
+        html_url: "https://epoch-ml.github.io/zerglang-releases/",
+        public: true,
+      },
+    ],
+    [
+      "Epoch-ML/zerglang-releases:branches/release-data",
+      {
+        name: "release-data",
+        commit: {
+          sha: "a".repeat(40),
+          commit: { tree: { sha: "b".repeat(40) } },
+        },
+      },
+    ],
+    [
+      `Epoch-ML/zerglang-releases:git/trees/${"b".repeat(40)}?recursive=1`,
+      {
+        truncated: false,
+        tree: [
+          { path: "site", mode: "040000", type: "tree" },
+          { path: "site/.nojekyll", mode: "100644", type: "blob" },
+          { path: "site/index.html", mode: "100644", type: "blob" },
+        ],
+      },
     ],
     [
       "Epoch-ML/zerglang-releases:actions/workflows",
@@ -232,7 +317,23 @@ test("collects settings through one injected read-only HTTP boundary", async () 
   assert.deepEqual(state, {
     release: {
       immutableReleases: { enabled: true },
-      pages: { https_enforced: true, build_type: "workflow" },
+      pages: {
+        https_enforced: true,
+        build_type: "workflow",
+        html_url: "https://epoch-ml.github.io/zerglang-releases/",
+        public: true,
+      },
+      feedBranch: {
+        name: "release-data",
+        sha: "a".repeat(40),
+        tree_sha: "b".repeat(40),
+        truncated: false,
+        entries: [
+          { path: "site", mode: "040000", type: "tree" },
+          { path: "site/.nojekyll", mode: "100644", type: "blob" },
+          { path: "site/index.html", mode: "100644", type: "blob" },
+        ],
+      },
       workflows: [
         {
           path: ".github/workflows/release.yml",
