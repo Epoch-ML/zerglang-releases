@@ -386,6 +386,11 @@ export function auditWorkflowPolicy(source) {
   );
 }
 
+export function auditPolicyWorkflow(source) {
+  parseWorkflow(source);
+  return [];
+}
+
 async function main() {
   if (process.argv.length !== 3) {
     throw new WorkflowPolicyError("usage: workflow-policy.mjs WORKFLOW.yml");
