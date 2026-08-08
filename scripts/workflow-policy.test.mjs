@@ -4,11 +4,16 @@ import test from "node:test";
 
 import {
   WorkflowPolicyError,
+  auditPolicyWorkflow,
   auditWorkflowPolicy,
 } from "./workflow-policy.mjs";
 
 const releaseWorkflow = await readFile(
   new URL("../.github/workflows/release.yml", import.meta.url),
+  "utf8",
+);
+const policyWorkflow = await readFile(
+  new URL("../.github/workflows/policy.yml", import.meta.url),
   "utf8",
 );
 
@@ -88,4 +93,13 @@ test("reports an unpinned action, mutable publication, and synthetic dispatch", 
   assert.deepEqual(diagnosticIdentities(synthetic), [
     "trigger-contract:workflow:job",
   ]);
+});
+
+test("requires pull-request CI to execute every public policy gate", () => {
+  assert.deepEqual(
+    auditPolicyWorkflow(policyWorkflow).map(
+      ({ code, job, step }) => `${code}:${job}:${step ?? "job"}`,
+    ),
+    ["policy-ci-contract:policy:job"],
+  );
 });
