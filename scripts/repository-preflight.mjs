@@ -5,7 +5,10 @@ import { pathToFileURL } from "node:url";
 const RELEASE_REPOSITORY = "Epoch-ML/zerglang-releases";
 const SOURCE_REPOSITORY = "Epoch-ML/zerg";
 const RELEASE_WORKFLOW = ".github/workflows/release.yml";
+const RELEASE_POLICY_ANCHOR = ".github/workflows/policy-anchor.yml";
 const SOURCE_WORKFLOW = ".github/workflows/zerglang-ide-release.yml";
+const SOURCE_POLICY_ANCHOR =
+  ".github/workflows/zerglang-release-policy-anchor.yml";
 const CANONICAL_PAGES_URL = "https://epoch-ml.github.io/zerglang-releases/";
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 
@@ -94,7 +97,7 @@ const EXPECTED_RULESETS = Object.freeze([
     rules: Object.freeze([
       "pull_request:rebase:1:last-push",
       "required_linear_history",
-      "required_status_checks:Release policy:15368:strict",
+      "required_status_checks:Protected-base release policy:15368:strict",
     ]),
   }),
   Object.freeze({
@@ -149,7 +152,7 @@ const EXPECTED_SOURCE_RULESETS = Object.freeze([
     rules: Object.freeze([
       "pull_request:rebase:1:last-push",
       "required_linear_history",
-      "required_status_checks:ZergLang release policy:15368:strict",
+      "required_status_checks:Protected-base ZergLang release policy:15368:strict",
     ]),
   }),
   Object.freeze({
@@ -334,15 +337,25 @@ export function auditRepositoryState(state, { phase } = {}) {
     ));
   }
 
-  for (const [repository, workflows, path] of [
-    ["release", release.workflows, RELEASE_WORKFLOW],
-    ["source", source.workflows, SOURCE_WORKFLOW],
+  for (const [repository, workflows, workflowPath, anchorPath] of [
+    [
+      "release",
+      release.workflows,
+      RELEASE_WORKFLOW,
+      RELEASE_POLICY_ANCHOR,
+    ],
+    ["source", source.workflows, SOURCE_WORKFLOW, SOURCE_POLICY_ANCHOR],
   ]) {
-    const workflow = findWorkflow(workflows, path);
-    if (workflow?.state !== expectedWorkflowState) {
+    const workflow = findWorkflow(workflows, workflowPath);
+    const anchor = findWorkflow(workflows, anchorPath);
+    if (
+      workflow?.state !== expectedWorkflowState ||
+      anchor?.state !== "active"
+    ) {
       errors.push(diagnostic(
         "workflow-state",
-        `${repository} workflow must be ${expectedWorkflowState}`,
+        `${repository} workflow must be ${expectedWorkflowState} and its ` +
+          "protected-base policy anchor must be active",
       ));
     }
   }
