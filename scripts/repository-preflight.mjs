@@ -432,12 +432,17 @@ export async function requestGitHub({
   path,
   apiVersion = "2022-11-28",
   allowNotFound = false,
-}) {
-  const token = process.env.GH_TOKEN;
+}, {
+  token = process.env.GH_TOKEN,
+  fetchImpl = fetch,
+} = {}) {
   if (typeof token !== "string" || token === "") {
     throw new RepositoryPreflightError("GH_TOKEN is required for repository preflight");
   }
-  const response = await fetch(
+  if (typeof fetchImpl !== "function") {
+    throw new RepositoryPreflightError("fetchImpl must be a function");
+  }
+  const response = await fetchImpl(
     `https://api.github.com/repos/${repository}/${path}`,
     {
       headers: {
