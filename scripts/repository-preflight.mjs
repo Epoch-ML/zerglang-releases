@@ -427,7 +427,7 @@ function normalizeRuleset(ruleset) {
   };
 }
 
-async function defaultRequest({
+export async function requestGitHub({
   repository,
   path,
   apiVersion = "2022-11-28",
@@ -496,7 +496,7 @@ async function collectRulesets(request, repository, response) {
 }
 
 export async function collectRepositoryState({
-  request = defaultRequest,
+  request = requestGitHub,
   releaseRepository = RELEASE_REPOSITORY,
   sourceRepository = SOURCE_REPOSITORY,
 } = {}) {
