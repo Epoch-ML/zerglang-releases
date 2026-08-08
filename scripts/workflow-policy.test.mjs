@@ -293,6 +293,21 @@ test("rejects feed authority that can write main or execute pulled policy", () =
       "feed-policy-boundary:feed:Prepare the monotonic release-data commit",
     ),
   );
+
+  for (const step of [
+    { run: "git pull --ff-only origin main" },
+    { run: "node data/scripts/feed-policy.mjs" },
+    { run: "echo inert", "working-directory": "data" },
+  ]) {
+    const oneEscape = cutoverReleaseVariant((workflow) => {
+      workflow.jobs.feed.steps.push({ name: "Pulled policy escape", ...step });
+    });
+    assert.ok(
+      diagnosticIdentities(oneEscape).includes(
+        "feed-policy-boundary:feed:Pulled policy escape",
+      ),
+    );
+  }
 });
 
 test("requires the feed environment, read-only token, and one bounded deploy key", () => {
@@ -321,6 +336,40 @@ test("requires the feed environment, read-only token, and one bounded deploy key
   });
   assert.ok(
     diagnosticIdentities(secondKeyWindow).includes(
+      "feed-credential-contract:feed:job",
+    ),
+  );
+
+  for (const token of [
+    "unset FEED_DEPLOY_KEY",
+    "policy/scripts/feed-promotion.mjs push",
+    "release-data",
+  ]) {
+    const weakenedPush = cutoverReleaseVariant((workflow) => {
+      const push = findStep(
+        workflow,
+        "feed",
+        "Push only the prepared release-data commit",
+      );
+      push.run = push.run.replace(token, "removed");
+    });
+    assert.ok(
+      diagnosticIdentities(weakenedPush).includes(
+        "feed-credential-contract:feed:Push only the prepared release-data commit",
+      ),
+    );
+  }
+
+  const wrongSecret = cutoverReleaseVariant((workflow) => {
+    const push = findStep(
+      workflow,
+      "feed",
+      "Push only the prepared release-data commit",
+    );
+    push.env.FEED_DEPLOY_KEY = "${{ secrets.UNRELATED_KEY }}";
+  });
+  assert.ok(
+    diagnosticIdentities(wrongSecret).includes(
       "feed-credential-contract:feed:job",
     ),
   );
@@ -353,6 +402,34 @@ test("rejects product execution on the Apple signer and credentials on signed sm
   assert.ok(
     diagnosticIdentities(credentialedSmoke).includes(
       "signed-smoke-credential:signed_smoke:Verify final Apple signatures and notarization",
+    ),
+  );
+
+  for (const run of [
+    "zlc answer.zl",
+    "run --tier=interpreter answer.zl",
+    "run --tier=jit answer.zl",
+    "build --emit=object answer.zl",
+  ]) {
+    const oneExecution = cutoverReleaseVariant((workflow) => {
+      workflow.jobs.apple_sign.steps.push({
+        name: "One product execution",
+        run,
+      });
+    });
+    assert.ok(
+      diagnosticIdentities(oneExecution).includes(
+        "product-execution-boundary:apple_sign:One product execution",
+      ),
+    );
+  }
+
+  const wrongAppleEnvironment = cutoverReleaseVariant((workflow) => {
+    workflow.jobs.apple_sign.environment = "preview";
+  });
+  assert.ok(
+    diagnosticIdentities(wrongAppleEnvironment).includes(
+      "environment-boundary:apple_sign:job",
     ),
   );
 });
