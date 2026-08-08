@@ -3,6 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "preflight:cutover": "node scripts/repository-preflight.mjs cutover",
+    "preflight:live": "node scripts/repository-preflight.mjs live",
     "test": "node --test scripts/*.test.mjs",
     "test:mutation": "stryker run stryker.config.mjs"
   },

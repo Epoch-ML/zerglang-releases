@@ -1,9 +1,11 @@
 export default {
   mutate: [
+    "scripts/feed-promotion.mjs",
     "scripts/feed-policy.mjs",
     "scripts/package-macos.mjs",
     "scripts/release-payload.mjs",
     "scripts/release-request.mjs",
+    "scripts/repository-preflight.mjs",
     "scripts/source-stage.mjs",
     "scripts/workflow-policy.mjs",
   ],
