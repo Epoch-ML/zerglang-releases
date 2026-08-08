@@ -1233,6 +1233,16 @@ test("requires the exact policy-CI trigger, branch, permissions, and secret-free
         env: { TOKEN: "${{secrets.ZERGLANG_APPLE_API_KEY_ID}}" },
       });
     }),
+    policyVariant((workflow) => {
+      workflow.jobs.policy.env = {
+        TOKEN: "${{ secrets['ZERGLANG_APPLE_API_KEY_ID'] }}",
+      };
+    }),
+    policyVariant((workflow) => {
+      workflow.jobs.policy.env = {
+        TOKEN: "${{ SeCrEtS[format('{0}', 'KEY')] }}",
+      };
+    }),
   ];
   for (const hostile of variants) {
     assert.deepEqual(policyDiagnosticIdentities(hostile), [
@@ -1244,6 +1254,34 @@ test("requires the exact policy-CI trigger, branch, permissions, and secret-free
     workflow.jobs.policy.metadata = null;
   });
   assert.deepEqual(policyDiagnosticIdentities(equivalent), []);
+});
+
+test("requires the exact policy job set and pinned action configuration", () => {
+  const variants = [
+    policyVariant((workflow) => {
+      workflow.jobs.hidden = {
+        uses: "example/hostile/.github/workflows/release.yml@main",
+        secrets: "inherit",
+        permissions: { contents: "write" },
+      };
+    }),
+    policyVariant((workflow) => {
+      workflow.jobs.policy.steps.unshift({
+        uses: "example/hostile@0123456789abcdef0123456789abcdef01234567",
+      });
+    }),
+    policyVariant((workflow) => {
+      workflow.jobs.policy.steps[0].with["persist-credentials"] = true;
+    }),
+    policyVariant((workflow) => {
+      workflow.jobs.policy["runs-on"] = "ubuntu-latest";
+    }),
+  ];
+  for (const hostile of variants) {
+    assert.deepEqual(policyDiagnosticIdentities(hostile), [
+      "policy-ci-contract:policy:job",
+    ]);
+  }
 });
 
 test("requires the policy job and every exact public CI operation", () => {
