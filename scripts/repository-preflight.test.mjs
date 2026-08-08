@@ -99,6 +99,10 @@ function healthyState(workflowState = "disabled_manually") {
           path: ".github/workflows/release.yml",
           state: workflowState,
         },
+        {
+          path: ".github/workflows/policy-anchor.yml",
+          state: "active",
+        },
       ],
       environments: structuredClone(RELEASE_ENVIRONMENTS),
       repositorySecrets: [],
@@ -129,7 +133,7 @@ function healthyState(workflowState = "disabled_manually") {
           rules: [
             "pull_request:rebase:1:last-push",
             "required_linear_history",
-            "required_status_checks:Release policy:15368:strict",
+            "required_status_checks:Protected-base release policy:15368:strict",
           ],
         },
         {
@@ -169,6 +173,10 @@ function healthyState(workflowState = "disabled_manually") {
         {
           path: ".github/workflows/zerglang-ide-release.yml",
           state: workflowState,
+        },
+        {
+          path: ".github/workflows/zerglang-release-policy-anchor.yml",
+          state: "active",
         },
       ],
       deployKeys: [
@@ -211,7 +219,7 @@ function healthyState(workflowState = "disabled_manually") {
           rules: [
             "pull_request:rebase:1:last-push",
             "required_linear_history",
-            "required_status_checks:ZergLang release policy:15368:strict",
+            "required_status_checks:Protected-base ZergLang release policy:15368:strict",
           ],
         },
         {
@@ -258,6 +266,39 @@ test("accepts the exact disabled cutover topology and reports only human-review 
   assert.deepEqual(result.errors, []);
   assert.deepEqual(result.warnings.map(({ code }) => code), [
     "human-review-limitation",
+  ]);
+});
+
+test("requires protected-base anchors instead of head-controlled checks", () => {
+  const state = healthyState();
+  state.release.workflows = state.release.workflows.filter(
+    ({ path }) => path !== ".github/workflows/policy-anchor.yml",
+  );
+  state.source.workflows = state.source.workflows.filter(
+    ({ path }) => path !==
+      ".github/workflows/zerglang-release-policy-anchor.yml",
+  );
+  const releaseReview = state.release.rulesets.find(
+    ({ name }) => name === "Reviewed release requests",
+  );
+  releaseReview.rules = releaseReview.rules.map((rule) =>
+    rule.replace("Protected-base release policy", "Release policy")
+  );
+  const sourceReview = state.source.rulesets.find(
+    ({ name }) => name === "Reviewed ZergLang changes",
+  );
+  sourceReview.rules = sourceReview.rules.map((rule) =>
+    rule.replace(
+      "Protected-base ZergLang release policy",
+      "ZergLang release policy",
+    )
+  );
+
+  assert.deepEqual(errorCodes(state), [
+    "ruleset-contract",
+    "source-ruleset-contract",
+    "workflow-state",
+    "workflow-state",
   ]);
 });
 
