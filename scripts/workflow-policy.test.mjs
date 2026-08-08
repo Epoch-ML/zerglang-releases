@@ -43,6 +43,80 @@ function policyVariant(mutate) {
   return workflowVariant(policyWorkflow, mutate);
 }
 
+function cutoverReleaseVariant(mutate = () => {}) {
+  return releaseVariant((workflow) => {
+    workflow.jobs.apple_sign.environment = {
+      name:
+        "${{ needs.validate.outputs.channel == 'stable' && 'stable' || 'zerglang-apple-preview' }}",
+    };
+    workflow.jobs.apple_sign.steps = workflow.jobs.apple_sign.steps.filter(
+      (step) => step.name !== "Smoke-test the final Apple-signed application",
+    );
+    workflow.jobs.signed_smoke = {
+      name: "Verify and execute the signed application without credentials",
+      needs: ["validate", "apple_sign"],
+      "runs-on": "macos-15",
+      permissions: { contents: "read" },
+      steps: [
+        {
+          name: "Verify final Apple signatures and notarization",
+          run: "codesign --verify ZergLang.app\nxcrun stapler validate ZergLang.app\nspctl --assess ZergLang.app",
+        },
+        {
+          name: "Smoke-test packaged interpreter, JIT, and AOT tiers",
+          run: "$zlc run --tier=interpreter answer.zl\n$zlc run --tier=jit answer.zl\n$zlc build --emit=object answer.zl",
+        },
+      ],
+    };
+    workflow.jobs.sign_updater_preview.needs = ["validate", "signed_smoke"];
+    workflow.jobs.sign_updater_stable.needs = ["validate", "signed_smoke"];
+    workflow.jobs.feed = {
+      name: "Promote canonical bytes on release-data",
+      needs: ["validate", "publish"],
+      "runs-on": "ubuntu-24.04",
+      environment: "zerglang-feed",
+      permissions: { contents: "read" },
+      steps: [
+        {
+          uses:
+            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+          with: {
+            path: "policy",
+            ref: "${{ github.sha }}",
+            "persist-credentials": false,
+          },
+        },
+        {
+          name: "Test the immutable policy checkout",
+          "working-directory": "policy",
+          run: "npm ci --ignore-scripts\nnpm test",
+        },
+        {
+          name: "Clone release-data without credentials",
+          run: "git clone --branch release-data --single-branch https://github.com/Epoch-ML/zerglang-releases.git data",
+        },
+        {
+          name: "Prepare the monotonic release-data commit",
+          run: "node policy/scripts/feed-promotion.mjs prepare data canonical stable 1.2.3",
+        },
+        {
+          name: "Push only the prepared release-data commit",
+          env: {
+            FEED_DEPLOY_KEY: "${{ secrets.ZERGLANG_FEED_DEPLOY_KEY }}",
+          },
+          run: "printf '%s' \"$FEED_DEPLOY_KEY\" > feed-key\nunset FEED_DEPLOY_KEY\nnode policy/scripts/feed-promotion.mjs push data git@github.com:Epoch-ML/zerglang-releases.git release-data",
+        },
+        {
+          uses:
+            "actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa",
+          with: { path: "data/site" },
+        },
+      ],
+    };
+    mutate(workflow);
+  });
+}
+
 function findStep(workflow, jobName, stepName) {
   const step = workflow.jobs[jobName].steps.find(
     (candidate) => candidate.name === stepName,
@@ -183,6 +257,124 @@ test("fails closed when release workflow containers have invalid YAML types", ()
 
 test("accepts the release workflow's isolated credential boundaries", () => {
   assert.deepEqual(diagnosticIdentities(releaseWorkflow), []);
+});
+
+test("accepts a release-data feed and a fresh credential-free signed smoke job", () => {
+  assert.deepEqual(diagnosticIdentities(cutoverReleaseVariant()), []);
+});
+
+test("rejects feed authority that can write main or execute pulled policy", () => {
+  const writesMain = cutoverReleaseVariant((workflow) => {
+    const push = findStep(
+      workflow,
+      "feed",
+      "Push only the prepared release-data commit",
+    );
+    push.run = push.run.replaceAll("release-data", "main");
+  });
+  assert.ok(
+    diagnosticIdentities(writesMain).includes("feed-authority:feed:job"),
+  );
+
+  const executesPulledPolicy = cutoverReleaseVariant((workflow) => {
+    findStep(
+      workflow,
+      "feed",
+      "Prepare the monotonic release-data commit",
+    ).run = "git pull --ff-only origin main\nnode data/scripts/feed-policy.mjs";
+  });
+  assert.ok(
+    diagnosticIdentities(executesPulledPolicy).includes(
+      "feed-policy-boundary:feed:Prepare the monotonic release-data commit",
+    ),
+  );
+});
+
+test("requires the feed environment, read-only token, and one bounded deploy key", () => {
+  const wrongEnvironment = cutoverReleaseVariant((workflow) => {
+    workflow.jobs.feed.environment = "preview";
+  });
+  assert.ok(
+    diagnosticIdentities(wrongEnvironment).includes(
+      "environment-boundary:feed:job",
+    ),
+  );
+
+  const writeToken = cutoverReleaseVariant((workflow) => {
+    workflow.jobs.feed.permissions.contents = "write";
+  });
+  assert.ok(
+    diagnosticIdentities(writeToken).includes("permission-boundary:feed:job"),
+  );
+
+  const secondKeyWindow = cutoverReleaseVariant((workflow) => {
+    workflow.jobs.feed.steps.push({
+      name: "Second feed credential",
+      env: { FEED_DEPLOY_KEY: "${{ secrets.ZERGLANG_FEED_DEPLOY_KEY }}" },
+      run: "echo duplicate",
+    });
+  });
+  assert.ok(
+    diagnosticIdentities(secondKeyWindow).includes(
+      "feed-credential-contract:feed:job",
+    ),
+  );
+});
+
+test("rejects product execution on the Apple signer and credentials on signed smoke", () => {
+  const executesProduct = cutoverReleaseVariant((workflow) => {
+    workflow.jobs.apple_sign.steps.push({
+      name: "Execute signed compiler",
+      run: "$zlc run --tier=jit answer.zl",
+    });
+  });
+  assert.ok(
+    diagnosticIdentities(executesProduct).includes(
+      "product-execution-boundary:apple_sign:Execute signed compiler",
+    ),
+  );
+
+  const credentialedSmoke = cutoverReleaseVariant((workflow) => {
+    workflow.jobs.signed_smoke.environment = "stable";
+    workflow.jobs.signed_smoke.steps[0].env = {
+      APPLE_KEY: "${{ secrets.ZERGLANG_APPLE_API_PRIVATE_KEY }}",
+    };
+  });
+  assert.ok(
+    diagnosticIdentities(credentialedSmoke).includes(
+      "environment-boundary:signed_smoke:job",
+    ),
+  );
+  assert.ok(
+    diagnosticIdentities(credentialedSmoke).includes(
+      "signed-smoke-credential:signed_smoke:Verify final Apple signatures and notarization",
+    ),
+  );
+});
+
+test("binds source checkout and Rust gates through public workflow diagnostics", () => {
+  const broadFetch = cutoverReleaseVariant((workflow) => {
+    const sourceCheckout = findStep(
+      workflow,
+      "build",
+      "Check out the exact source commit and matching tag",
+    );
+    sourceCheckout.run = sourceCheckout.run.replace(
+      'git -C source fetch --no-tags --depth=1 origin "$EXPECTED_SHA"',
+      "git -C source fetch origin --all",
+    );
+  });
+  assert.ok(
+    diagnosticIdentities(broadFetch).includes("job-contract:build:job"),
+  );
+
+  const missingComponents = cutoverReleaseVariant((workflow) => {
+    const tools = findStep(workflow, "build", "Install pinned build tools");
+    tools.run = tools.run.replace("--component clippy,rustfmt", "");
+  });
+  assert.ok(
+    diagnosticIdentities(missingComponents).includes("job-contract:build:job"),
+  );
 });
 
 test("accepts protected environment objects and order-independent dependencies", () => {
