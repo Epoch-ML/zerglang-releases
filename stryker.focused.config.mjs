@@ -56,6 +56,11 @@ export default {
   concurrency: 4,
   coverageAnalysis: "off",
   reporters: ["clear-text", "progress"],
+  thresholds: {
+    high: 90,
+    low: 80,
+    break: 80,
+  },
   timeoutMS: 60_000,
   tempDirName: `.stryker-tmp/${selected}`,
   cleanTempDir: "always",
