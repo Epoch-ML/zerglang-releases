@@ -136,6 +136,13 @@ function healthyState(workflowState = "disabled_manually") {
           read_only: true,
         },
       ],
+      environments: {
+        "zerglang-release-request": {
+          secrets: [],
+          branches: ["zerglang"],
+        },
+      },
+      repositorySecrets: [],
       rulesets: [
         {
           name: "ZergLang branch authority",
@@ -259,6 +266,28 @@ test("requires the canonical public Pages origin and a data-only feed branch", (
   );
 });
 
+test("keeps source request handoff free of write credentials", () => {
+  const state = healthyState();
+  state.source.environments["zerglang-release-request"].secrets.push(
+    "ZERGLANG_RELEASES_DEPLOY_KEY",
+  );
+  state.source.repositorySecrets.push("ZERGLANG_RELEASES_DEPLOY_KEY");
+
+  assert.deepEqual(
+    auditRepositoryState(state, { phase: "cutover" }).errors,
+    [
+      {
+        code: "source-environment-contract",
+        message: "zerglang-release-request must be secret-free and branch-scoped",
+      },
+      {
+        code: "source-repository-secret",
+        message: "source request write credentials must be absent",
+      },
+    ],
+  );
+});
+
 test("collects settings through one injected read-only HTTP boundary", async () => {
   const calls = [];
   const responses = new Map([
@@ -305,6 +334,19 @@ test("collects settings through one injected read-only HTTP boundary", async () 
       "Epoch-ML/zerg:actions/workflows",
       { workflows: [{ path: ".github/workflows/zerglang-ide-release.yml", state: "disabled_manually" }] },
     ],
+    [
+      "Epoch-ML/zerg:environments",
+      { environments: [{ name: "zerglang-release-request" }] },
+    ],
+    [
+      "Epoch-ML/zerg:environments/zerglang-release-request/secrets",
+      { secrets: [] },
+    ],
+    [
+      "Epoch-ML/zerg:environments/zerglang-release-request/deployment-branch-policies",
+      { branch_policies: [{ name: "zerglang" }] },
+    ],
+    ["Epoch-ML/zerg:actions/secrets", { secrets: [] }],
     ["Epoch-ML/zerg:keys", []],
     ["Epoch-ML/zerg:rulesets", []],
   ]);
@@ -352,6 +394,13 @@ test("collects settings through one injected read-only HTTP boundary", async () 
           state: "disabled_manually",
         },
       ],
+      environments: {
+        "zerglang-release-request": {
+          secrets: [],
+          branches: ["zerglang"],
+        },
+      },
+      repositorySecrets: [],
       deployKeys: [],
       rulesets: [],
     },
