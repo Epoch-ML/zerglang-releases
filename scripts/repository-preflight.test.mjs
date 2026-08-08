@@ -12,7 +12,7 @@ const RELEASE_ENVIRONMENTS = {
       "ZERGLANG_TAURI_SIGNING_PRIVATE_KEY",
       "ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
     ],
-    branches: ["main"],
+    refs: ["branch:main"],
   },
   stable: {
     secrets: [
@@ -23,25 +23,25 @@ const RELEASE_ENVIRONMENTS = {
       "ZERGLANG_APPLE_CERTIFICATE_PASSWORD",
       "ZERGLANG_APPLE_SIGNING_IDENTITY",
     ],
-    branches: ["main"],
+    refs: ["branch:main"],
   },
-  "zerglang-apple-preview": { secrets: [], branches: ["main"] },
+  "zerglang-apple-preview": { secrets: [], refs: ["branch:main"] },
   "zerglang-feed": {
     secrets: ["ZERGLANG_FEED_DEPLOY_KEY"],
-    branches: ["main"],
+    refs: ["branch:main"],
   },
   "zerglang-source-read": {
     secrets: ["ZERG_SOURCE_DEPLOY_KEY"],
-    branches: ["main"],
+    refs: ["branch:main"],
   },
   "zerglang-updater-stable": {
     secrets: [
       "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY",
       "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
     ],
-    branches: ["main"],
+    refs: ["branch:main"],
   },
-  "github-pages": { secrets: [], branches: ["main"] },
+  "github-pages": { secrets: [], refs: ["branch:main"] },
 };
 
 function healthyState(workflowState = "disabled_manually") {
@@ -139,7 +139,10 @@ function healthyState(workflowState = "disabled_manually") {
       environments: {
         "zerglang-release-request": {
           secrets: [],
-          branches: ["zerglang"],
+          refs: [
+            "tag:zerglang-ide-preview-v*",
+            "tag:zerglang-ide-v*",
+          ],
         },
       },
       repositorySecrets: [],
@@ -278,7 +281,7 @@ test("keeps source request handoff free of write credentials", () => {
     [
       {
         code: "source-environment-contract",
-        message: "zerglang-release-request must be secret-free and branch-scoped",
+        message: "zerglang-release-request must be secret-free and tag-scoped",
       },
       {
         code: "source-repository-secret",
@@ -344,7 +347,12 @@ test("collects settings through one injected read-only HTTP boundary", async () 
     ],
     [
       "Epoch-ML/zerg:environments/zerglang-release-request/deployment-branch-policies",
-      { branch_policies: [{ name: "zerglang" }] },
+      {
+        branch_policies: [
+          { name: "zerglang-ide-preview-v*", type: "tag" },
+          { name: "zerglang-ide-v*", type: "tag" },
+        ],
+      },
     ],
     ["Epoch-ML/zerg:actions/secrets", { secrets: [] }],
     ["Epoch-ML/zerg:keys", []],
@@ -397,7 +405,10 @@ test("collects settings through one injected read-only HTTP boundary", async () 
       environments: {
         "zerglang-release-request": {
           secrets: [],
-          branches: ["zerglang"],
+          refs: [
+            "tag:zerglang-ide-preview-v*",
+            "tag:zerglang-ide-v*",
+          ],
         },
       },
       repositorySecrets: [],
