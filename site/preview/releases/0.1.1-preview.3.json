@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "product": "ZergLang IDE",
+  "version": "0.1.1-preview.3",
+  "channel": "preview",
+  "platform": "darwin-aarch64",
+  "source_sha": "6452bb5a63cfd94d5f60392fe470bad34892905a",
+  "apple_notarized": false,
+  "artifacts": [
+    {
+      "name": "ZergLang.app.tar.gz",
+      "sha256": "54b7ec468d8949573c5569b010565218bd884a24d8c7a32eae9b2dd74a1f78a1"
+    },
+    {
+      "name": "ZergLang.app.tar.gz.sig",
+      "sha256": "f9ee6834edd57bc9ed474166297606d1f34e76ffea73eac7c5b4d30a0cbbbc05"
+    },
+    {
+      "name": "ZergLang_0.1.1-preview.3_aarch64.dmg",
+      "sha256": "b464d4568114dc28f0b9d2eaa0d74192ed1792cb105b565af2c3f1aa407d3e79"
+    }
+  ]
+}
