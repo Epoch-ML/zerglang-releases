@@ -1,0 +1,11 @@
+{
+  "version": "0.1.1-preview.3",
+  "notes": "ZergLang IDE preview release from source 6452bb5a63cfd94d5f60392fe470bad34892905a.",
+  "pub_date": "2026-08-08T16:52:42.769Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRcmhjTEhvczIxUXVvN3pGMmM2ckREK05tdGg3TXdOV0tmYXVCUmhOQk9ES1JVMHhvQm9qRGRTdUFIVTN6ZkoyNFVHZlpsZTQzV3V3N3M2QzNUdUNBcU1DM0o4YkVqbnc0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2MjA4OTAxCWZpbGU6WmVyZ0xhbmcuYXBwLnRhci5negplNExaYWJjZEZuL3hTS0VJUm1veDRueXhpRDdEZnRiVHYwbTIvbksxWlYwMTRCemJQYjZPMzBDRndnM0t2RHZkKzg0WHFhbHo0SXllTmxHdVE5bU1BQT09Cg==",
+      "url": "https://github.com/Epoch-ML/zerglang-releases/releases/download/zerglang-ide-preview-v0.1.1-preview.3/ZergLang.app.tar.gz"
+    }
+  }
+}
