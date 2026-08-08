@@ -6,10 +6,12 @@ the GitHub Pages updater manifests consumed by installed applications. The
 ZergLang source remains in `Epoch-ML/zerg` and is checked out at the immutable
 40-character commit recorded by each request.
 
-Release publication is intentionally pull-based:
+Release publication is intentionally request-driven:
 
-1. A matching tag in `Epoch-ML/zerg` writes exactly one immutable JSON file to
-   `requests/` through a write-scoped deploy key.
+1. A matching tag in `Epoch-ML/zerg` validates and uploads one bounded request
+   JSON artifact. A human downloads that artifact, verifies it, adds exactly
+   that one file to `requests/`, and opens a pull request. Source CI holds no
+   credential capable of writing to this repository.
 2. This repository validates the request schema, channel, strict SemVer,
    channel-specific tag, source ref, and source SHA.
 3. A pinned Apple Silicon `macos-15` runner checks out the source SHA with a
@@ -29,8 +31,13 @@ Release publication is intentionally pull-based:
 7. The workflow downloads all six public assets over HTTPS, verifies their API
    sizes/digests, checksums, updater signature, archive bounds, request
    provenance, and exact URL shape, and promotes only those canonical bytes.
-   Feed history is monotonic and byte-idempotent. The final job byte-compares
-   the live Pages `latest.json` with the canonical release copy.
+   A credential-free step prepares a bounded commit in the data-only
+   `release-data` branch. The feed credential exists only in the final push
+   step, which runs trusted policy from the immutable `main` workflow commit
+   and never executes code from `release-data`.
+8. GitHub Pages is deployed from the verified `release-data` tree. The final
+   job byte-compares the live HTTPS `latest.json` with the canonical Release
+   asset. Feed history is monotonic and byte-idempotent.
 
 The updater URLs are:
 
@@ -66,23 +73,27 @@ prerelease/build metadata.
 Validate the policy locally with Node 22 or newer:
 
 ```bash
-node --test scripts/release-request.test.mjs
+npm ci --ignore-scripts
+npm test
+npm audit --audit-level=moderate
 node scripts/release-request.mjs requests/zerglang-ide-preview-v0.2.0-rc.1.json
 ```
 
 ## Repository credentials
 
-No personal access token is used. Configure two different deploy-key pairs;
-GitHub does not allow one deploy key to be attached to multiple repositories.
+No personal access token or repository-scoped Actions secret is used. Each
+credential is held by the one protected environment whose job needs it.
 
 | Location | Secret / setting | Scope |
 |---|---|---|
-| `Epoch-ML/zerg` secret | `ZERGLANG_RELEASES_DEPLOY_KEY` | Private key whose public half is a **write-enabled** deploy key on this repository; it may only submit request JSON. |
-| This repository secret | `ZERG_SOURCE_DEPLOY_KEY` | Private key whose public half is a **read-only** deploy key on `Epoch-ML/zerg`; it may only fetch source. |
-| This repository secret | `ZERGLANG_TAURI_SIGNING_PRIVATE_KEY` | Legacy preview-only Tauri private key. It is referenced only by the isolated updater signer running behind the protected `preview` environment. |
-| This repository secret | `ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the preview-only updater key. |
+| `zerglang-source-read` environment | `ZERG_SOURCE_DEPLOY_KEY` | Private key whose public half is a **read-only** deploy key on `Epoch-ML/zerg`; it may only fetch the exact source commit and tag. |
+| `preview` environment | `ZERGLANG_TAURI_SIGNING_PRIVATE_KEY` | Preview-only Tauri updater private key. |
+| `preview` environment | `ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the preview-only updater key. |
 | `zerglang-updater-stable` environment | `ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY` | Distinct stable-only Tauri private key. |
 | `zerglang-updater-stable` environment | `ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the stable-only updater key. |
+| `stable` environment | `ZERGLANG_APPLE_*` | Developer ID certificate, signing identity, and App Store Connect notarization credentials; Apple signing only. |
+| `zerglang-apple-preview` environment | none | Empty environment that keeps preview Apple-signing policy separate from updater-key custody. |
+| `zerglang-feed` environment | `ZERGLANG_FEED_DEPLOY_KEY` | Private key whose public half is the repository's only write-enabled deploy key; it may advance only `release-data` under the feed rulesets. |
 
 The public roots are intentionally committed at
 `keys/zerglang-{preview,stable}-updater.pubkey` here and at
@@ -91,11 +102,11 @@ repository. The workflow requires byte equality and refuses a shared root.
 The legacy source `updater.pubkey` remains the preview root so existing preview
 installations retain their update path.
 
-The fresh Apple-signing job targets the channel environment (`preview` or
-`stable`), and the isolated preview updater signer also runs behind the
-protected `preview` environment while reading the legacy repository secret.
-Stable macOS releases require all of these secrets on the protected **stable**
-environment, rather than at repository scope:
+The fresh Apple-signing job targets `zerglang-apple-preview` for preview builds
+and `stable` for stable builds. The preview updater signer separately targets
+`preview`; the stable updater signer targets `zerglang-updater-stable`. Stable
+macOS releases require all of these secrets on the protected `stable`
+environment:
 
 - `ZERGLANG_APPLE_CERTIFICATE`: base64-encoded Developer ID Application `.p12`
 - `ZERGLANG_APPLE_CERTIFICATE_PASSWORD`: export password for that `.p12`
@@ -111,11 +122,29 @@ so Gatekeeper may warn users; stable publication fails closed when any Apple
 credential or notarization evidence is missing. Environment protection rules
 can require a human approval before the stable job receives those credentials.
 
-Protect `preview`, `stable`, and `zerglang-updater-stable` so they deploy only
-from `main`; stable environments should require the release owner as reviewer
-and disable administrator bypass. Enable GitHub Pages with **GitHub Actions**
-as its source. `GITHUB_TOKEN` is the only token used to create Releases, update
-updater manifests, and deploy Pages.
+Protect `preview`, `stable`, `zerglang-apple-preview`, `zerglang-feed`,
+`zerglang-source-read`, `zerglang-updater-stable`, and `github-pages` so they
+deploy only from `main`. Enable GitHub Pages with **GitHub Actions** as its
+source and enforce HTTPS. `GITHUB_TOKEN` is used only for read-only validation,
+the GitHub Release API, and Pages deployment; it never writes the updater feed.
+
+The `release-data` branch contains only the deployed `site/` tree. Protect it
+with two active rulesets: creation/update may be bypassed only by the dedicated
+feed deploy key, while deletion and non-fast-forward updates have no bypass.
+Protect `main` with rebase-only pull requests, one approval, approval after the
+last push, strict `Release policy`, and linear history. Apply the equivalent
+strict `ZergLang release policy` contract to the source `zerglang` branch.
+
+Before cutover, keep both release workflows manually disabled and run:
+
+```bash
+GH_TOKEN="$(gh auth token)" npm run preflight:cutover
+```
+
+After an explicit, separately reviewed enablement change, require the same
+audit with `npm run preflight:live`. The audit intentionally reports that Idan
+retains a review bypass until a second trusted human can be enrolled; removing
+that bypass first would risk locking out the only current administrator.
 
 ## Manual recovery
 
@@ -133,12 +162,14 @@ gh workflow run release.yml --ref main \
   -f request_file=requests/<release-tag>.json
 ```
 
-GitHub Releases are draft-first and immutable. A retry resumes an exact draft
-and uploads only missing assets. A retry after publication accepts only an
-exact published release reporting `immutable: true`, ignores nondeterministic
-regenerated bytes, reconstructs the candidate from canonical public assets,
-and continues feed/Pages/live verification. Mutable published Releases fail
-closed.
+GitHub Releases are draft-first and immutable. If a run fails after creating a
+partial draft, use **Re-run failed jobs** on that same workflow run: the retry
+resumes the exact draft and uploads only missing assets. Do not start a second
+dispatch while that run can be resumed. A later recovery dispatch after
+publication accepts only an exact published release reporting
+`immutable: true`, ignores nondeterministic regenerated bytes, reconstructs the
+candidate from canonical public assets, and continues feed/Pages/live
+verification. Mutable published Releases fail closed.
 
 The historical `zerglang-ide-v0.1.1` request predates the dual-root source
 contract and is intentionally not a stable release candidate. The first stable
