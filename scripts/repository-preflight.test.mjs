@@ -65,6 +65,7 @@ function healthyState(workflowState = "disabled_manually") {
           { path: "site", mode: "040000", type: "tree" },
           { path: "site/.nojekyll", mode: "100644", type: "blob" },
           { path: "site/index.html", mode: "100644", type: "blob" },
+          { path: "site/preview", mode: "040000", type: "tree" },
           {
             path: "site/preview/latest.json",
             mode: "100644",
@@ -295,6 +296,26 @@ test("keeps source request handoff free of write credentials", () => {
       },
     ],
   );
+
+  const wrongRefs = healthyState();
+  wrongRefs.source.environments["zerglang-release-request"].refs = [
+    "branch:zerglang",
+  ];
+  assert.deepEqual(errorCodes(wrongRefs), ["source-environment-contract"]);
+});
+
+test("requires every canonical Pages property independently", () => {
+  const mutations = [
+    (pages) => { pages.https_enforced = false; },
+    (pages) => { pages.build_type = "legacy"; },
+    (pages) => { pages.html_url = "https://example.invalid/"; },
+    (pages) => { pages.public = false; },
+  ];
+  for (const mutate of mutations) {
+    const state = healthyState();
+    mutate(state.release.pages);
+    assert.deepEqual(errorCodes(state), ["pages-contract"]);
+  }
 });
 
 test("fails malformed phases and repository state through the public error type", () => {
@@ -319,27 +340,55 @@ test("enforces every environment, workflow, key, and ruleset identity", () => {
     state.release.environments[name].refs = [];
     assert.deepEqual(errorCodes(state), ["environment-contract"]);
   }
+  const missingEnvironment = healthyState();
+  delete missingEnvironment.release.environments.preview;
+  assert.deepEqual(errorCodes(missingEnvironment), ["environment-contract"]);
+  const secretEnvironment = healthyState();
+  secretEnvironment.release.environments.preview.secrets.push("EXTRA");
+  assert.deepEqual(errorCodes(secretEnvironment), ["environment-contract"]);
 
   const missingReleaseWorkflow = healthyState();
   missingReleaseWorkflow.release.workflows = [];
   assert.deepEqual(errorCodes(missingReleaseWorkflow), ["workflow-state"]);
+  const unrelatedWorkflow = healthyState();
+  unrelatedWorkflow.release.workflows.unshift({
+    path: ".github/workflows/unrelated.yml",
+    state: "active",
+  });
+  assert.equal(errorCodes(unrelatedWorkflow).includes("workflow-state"), false);
 
   const wrongFeedKey = healthyState();
   wrongFeedKey.release.deployKeys[0].verified = false;
   assert.deepEqual(errorCodes(wrongFeedKey), ["deploy-key"]);
+  const wrongFeedTitle = healthyState();
+  wrongFeedTitle.release.deployKeys[0].title = "unrelated writer";
+  assert.deepEqual(errorCodes(wrongFeedTitle), ["deploy-key"]);
+  const readOnlyExtra = healthyState();
+  readOnlyExtra.release.deployKeys.push({
+    title: "read-only observer",
+    verified: true,
+    read_only: true,
+  });
+  assert.equal(errorCodes(readOnlyExtra).includes("deploy-key"), false);
 
   const wrongSourceKey = healthyState();
   wrongSourceKey.source.deployKeys[0].title = "unrelated key";
   assert.deepEqual(errorCodes(wrongSourceKey), ["source-key"]);
+  const unverifiedSourceKey = healthyState();
+  unverifiedSourceKey.source.deployKeys[0].verified = false;
+  assert.deepEqual(errorCodes(unverifiedSourceKey), ["source-key"]);
 
   for (const owner of ["release", "source"]) {
     for (const index of healthyState()[owner].rulesets.keys()) {
-      const state = healthyState();
-      state[owner].rulesets[index].refs = [];
-      assert.deepEqual(
-        errorCodes(state),
-        [owner === "release" ? "ruleset-contract" : "source-ruleset-contract"],
-      );
+      for (const field of ["refs", "bypass", "rules"]) {
+        const state = healthyState();
+        state[owner].rulesets[index][field] =
+          state[owner].rulesets[index][field].length === 0 ? ["unexpected"] : [];
+        assert.deepEqual(
+          errorCodes(state),
+          [owner === "release" ? "ruleset-contract" : "source-ruleset-contract"],
+        );
+      }
     }
   }
 });
@@ -352,11 +401,18 @@ test("enforces every bounded release-data branch invariant", () => {
     (branch) => { branch.truncated = true; },
     (branch) => { branch.entries = []; },
     (branch) => { branch.entries.push(structuredClone(branch.entries[0])); },
+    (branch) => { branch.entries[1] = null; },
+    (branch) => { branch.entries[1] = []; },
     (branch) => { branch.entries[0].mode = "100644"; },
+    (branch) => { branch.entries[0].type = "blob"; },
     (branch) => { branch.entries[1].path = "outside/policy.mjs"; },
+    (branch) => { branch.entries[1].path = ""; },
+    (branch) => { branch.entries[1].path = 7; },
     (branch) => { branch.entries[1].mode = "100755"; },
     (branch) => { branch.entries[1].type = "commit"; },
     (branch) => { branch.entries[1].path = `site/${"x".repeat(508)}`; },
+    (branch) => { branch.entries[3].mode = "100644"; },
+    (branch) => { branch.entries[3].type = "blob"; },
     (branch) => {
       branch.entries = branch.entries.filter(
         ({ path }) => path !== "site/index.html",
@@ -368,6 +424,14 @@ test("enforces every bounded release-data branch invariant", () => {
     mutate(state.release.feedBranch);
     assert.deepEqual(errorCodes(state), ["feed-branch-contract"]);
   }
+
+  const exactMinimum = healthyState();
+  exactMinimum.release.feedBranch.entries = [
+    { path: "site", mode: "040000", type: "tree" },
+    { path: "site/.nojekyll", mode: "100644", type: "blob" },
+    { path: "site/index.html", mode: "100644", type: "blob" },
+  ];
+  assert.equal(errorCodes(exactMinimum).includes("feed-branch-contract"), false);
 
   const exactLimit = healthyState();
   while (exactLimit.release.feedBranch.entries.length < 4_096) {
@@ -451,6 +515,30 @@ test("handles only an explicitly allowed missing GitHub resource", async () => {
     ),
     /GH_TOKEN is required for repository preflight/,
   );
+  await assert.rejects(
+    requestGitHub(
+      { repository: "Epoch-ML/zerglang-releases", path: "rulesets" },
+      { token: "test-token", fetchImpl: null },
+    ),
+    /fetchImpl must be a function/,
+  );
+
+  const serverFailure = async () => ({
+    ok: false,
+    status: 500,
+    json: async () => ({ message: "failure" }),
+  });
+  await assert.rejects(
+    requestGitHub(
+      {
+        repository: "Epoch-ML/zerglang-releases",
+        path: "branches/release-data",
+        allowNotFound: true,
+      },
+      { token: "test-token", fetchImpl: serverFailure },
+    ),
+    /returned 500/,
+  );
 });
 
 test("collects settings through one injected read-only HTTP boundary", async () => {
@@ -491,10 +579,69 @@ test("collects settings through one injected read-only HTTP boundary", async () 
       "Epoch-ML/zerglang-releases:actions/workflows",
       { workflows: [{ path: ".github/workflows/release.yml", state: "disabled_manually" }] },
     ],
-    ["Epoch-ML/zerglang-releases:environments", { environments: [] }],
-    ["Epoch-ML/zerglang-releases:actions/secrets", { secrets: [] }],
-    ["Epoch-ML/zerglang-releases:keys", []],
-    ["Epoch-ML/zerglang-releases:rulesets", []],
+    [
+      "Epoch-ML/zerglang-releases:environments",
+      { environments: [{ name: "zerglang-feed" }] },
+    ],
+    [
+      "Epoch-ML/zerglang-releases:environments/zerglang-feed/secrets",
+      { secrets: [{ name: "Z_SECRET" }, { name: "A_SECRET" }] },
+    ],
+    [
+      "Epoch-ML/zerglang-releases:environments/zerglang-feed/deployment-branch-policies",
+      { branch_policies: [{ name: "main", type: "branch" }] },
+    ],
+    [
+      "Epoch-ML/zerglang-releases:actions/secrets",
+      { secrets: [{ name: "Z_REPOSITORY" }, { name: "A_REPOSITORY" }] },
+    ],
+    [
+      "Epoch-ML/zerglang-releases:keys",
+      [{ title: "feed key", verified: true, read_only: false }],
+    ],
+    ["Epoch-ML/zerglang-releases:rulesets", [{ id: 2 }, { id: 1 }]],
+    [
+      "Epoch-ML/zerglang-releases:rulesets/1",
+      {
+        name: "Reviewed release requests",
+        enforcement: "active",
+        conditions: { ref_name: { include: ["refs/heads/main"] } },
+        bypass_actors: [
+          { actor_type: "User", actor_id: 1042757 },
+          { actor_type: "DeployKey", actor_id: null },
+        ],
+        rules: [
+          {
+            type: "pull_request",
+            parameters: {
+              allowed_merge_methods: ["rebase"],
+              required_approving_review_count: 1,
+              require_last_push_approval: true,
+            },
+          },
+          {
+            type: "required_status_checks",
+            parameters: {
+              strict_required_status_checks_policy: true,
+              required_status_checks: [
+                { context: "Release policy", integration_id: 15368 },
+              ],
+            },
+          },
+          { type: "required_linear_history" },
+        ],
+      },
+    ],
+    [
+      "Epoch-ML/zerglang-releases:rulesets/2",
+      {
+        name: "Inactive rule",
+        enforcement: "evaluate",
+        conditions: { ref_name: { include: ["~ALL"] } },
+        bypass_actors: [],
+        rules: [{ type: "deletion" }],
+      },
+    ],
     [
       "Epoch-ML/zerg:actions/workflows",
       { workflows: [{ path: ".github/workflows/zerglang-ide-release.yml", state: "disabled_manually" }] },
@@ -518,7 +665,17 @@ test("collects settings through one injected read-only HTTP boundary", async () 
     ],
     ["Epoch-ML/zerg:actions/secrets", { secrets: [] }],
     ["Epoch-ML/zerg:keys", []],
-    ["Epoch-ML/zerg:rulesets", []],
+    ["Epoch-ML/zerg:rulesets", [{ id: 3 }]],
+    [
+      "Epoch-ML/zerg:rulesets/3",
+      {
+        name: "ZergLang branch history",
+        enforcement: "active",
+        conditions: { ref_name: { include: ["refs/heads/zerglang"] } },
+        bypass_actors: [],
+        rules: [{ type: "deletion" }, { type: "non_fast_forward" }],
+      },
+    ],
   ]);
   const request = async ({ repository, path }) => {
     calls.push(`${repository}:${path}`);
@@ -552,10 +709,26 @@ test("collects settings through one injected read-only HTTP boundary", async () 
           state: "disabled_manually",
         },
       ],
-      environments: {},
-      repositorySecrets: [],
-      deployKeys: [],
-      rulesets: [],
+      environments: {
+        "zerglang-feed": {
+          secrets: ["A_SECRET", "Z_SECRET"],
+          refs: ["branch:main"],
+        },
+      },
+      repositorySecrets: ["A_REPOSITORY", "Z_REPOSITORY"],
+      deployKeys: [{ title: "feed key", verified: true, read_only: false }],
+      rulesets: [
+        {
+          name: "Reviewed release requests",
+          refs: ["refs/heads/main"],
+          bypass: ["DeployKey:any", "User:1042757"],
+          rules: [
+            "pull_request:rebase:1:last-push",
+            "required_linear_history",
+            "required_status_checks:Release policy:15368:strict",
+          ],
+        },
+      ],
     },
     source: {
       workflows: [
@@ -575,8 +748,24 @@ test("collects settings through one injected read-only HTTP boundary", async () 
       },
       repositorySecrets: [],
       deployKeys: [],
-      rulesets: [],
+      rulesets: [
+        {
+          name: "ZergLang branch history",
+          refs: ["refs/heads/zerglang"],
+          bypass: [],
+          rules: ["deletion", "non_fast_forward"],
+        },
+      ],
     },
   });
   assert.deepEqual(calls, [...responses.keys()]);
+});
+
+test("rejects a non-callable collector boundary before any repository access", async () => {
+  await assert.rejects(
+    collectRepositoryState({ request: null }),
+    (error) =>
+      error instanceof RepositoryPreflightError &&
+      error.message === "request must be a function",
+  );
 });
