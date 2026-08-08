@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFile, stat } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 const EXPECTED_FIELDS = [
@@ -123,8 +123,8 @@ export function validateReleaseRequest(request) {
 }
 
 export async function readReleaseRequest(path) {
-  const metadata = await stat(path);
-  if (!metadata.isFile()) {
+  const metadata = await lstat(path);
+  if (metadata.isSymbolicLink() || !metadata.isFile()) {
     throw new ReleaseRequestError("release request path must identify a regular file");
   }
   if (metadata.size > MAX_REQUEST_BYTES) {

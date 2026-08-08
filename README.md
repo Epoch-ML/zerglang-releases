@@ -13,14 +13,24 @@ Release publication is intentionally pull-based:
 2. This repository validates the request schema, channel, strict SemVer,
    channel-specific tag, source ref, and source SHA.
 3. A pinned Apple Silicon `macos-15` runner checks out the source SHA with a
-   separate read-only deploy key, verifies the source tag, and builds/tests the
-   compiler and IDE.
-4. Tauri produces a signed updater archive and DMG. The workflow verifies the
-   archive's minisign signature, native bundle structure, checksums, and (for
-   stable releases) Developer ID signature and notarization ticket.
-5. The workflow creates the GitHub Release, downloads every asset again over
-   HTTPS, compares it byte-for-byte, and only then commits
-   `site/<channel>/latest.json` and deploys Pages.
+   separate read-only deploy key, verifies the source tag and both independent
+   channel trust roots, builds/tests the compiler and IDE, and emits a bounded
+   ad-hoc source stage. It receives no Apple or updater-signing credentials.
+4. A fresh Apple runner validates the hostile stage with public repository
+   code, then applies preview ad-hoc signing or stable Developer ID signing and
+   notarization. It receives no updater private key.
+5. Exactly one fresh updater signer runs. Preview uses the legacy preview key;
+   stable uses a distinct protected stable key. It signs only the finished
+   Apple-signed archive and emits exactly six assets, including `latest.json`
+   as an immutable recovery copy.
+6. Publication creates or resumes a draft, rejects unexpected, duplicate, or
+   mismatched assets, verifies authenticated draft bytes, publishes, and then
+   requires the GitHub API to report `immutable: true`.
+7. The workflow downloads all six public assets over HTTPS, verifies their API
+   sizes/digests, checksums, updater signature, archive bounds, request
+   provenance, and exact URL shape, and promotes only those canonical bytes.
+   Feed history is monotonic and byte-idempotent. The final job byte-compares
+   the live Pages `latest.json` with the canonical release copy.
 
 The updater URLs are:
 
@@ -69,15 +79,23 @@ GitHub does not allow one deploy key to be attached to multiple repositories.
 |---|---|---|
 | `Epoch-ML/zerg` secret | `ZERGLANG_RELEASES_DEPLOY_KEY` | Private key whose public half is a **write-enabled** deploy key on this repository; it may only submit request JSON. |
 | This repository secret | `ZERG_SOURCE_DEPLOY_KEY` | Private key whose public half is a **read-only** deploy key on `Epoch-ML/zerg`; it may only fetch source. |
-| This repository secret | `ZERGLANG_TAURI_SIGNING_PRIVATE_KEY` | Long-lived Tauri updater private key. Back it up securely; losing it breaks updates for every installed client that trusts its public key. |
-| This repository secret | `ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the updater private key. |
+| This repository secret | `ZERGLANG_TAURI_SIGNING_PRIVATE_KEY` | Legacy preview-only Tauri private key. It is referenced only by the isolated updater signer running behind the protected `preview` environment. |
+| This repository secret | `ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the preview-only updater key. |
+| `zerglang-updater-stable` environment | `ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY` | Distinct stable-only Tauri private key. |
+| `zerglang-updater-stable` environment | `ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the stable-only updater key. |
 
-The matching updater public key is intentionally public and committed at
-`zerglang/ide/src-tauri/updater.pubkey` in the source repository.
+The public roots are intentionally committed at
+`keys/zerglang-{preview,stable}-updater.pubkey` here and at
+`zerglang/ide/src-tauri/updater.{preview,stable}.pubkey` in the source
+repository. The workflow requires byte equality and refuses a shared root.
+The legacy source `updater.pubkey` remains the preview root so existing preview
+installations retain their update path.
 
-The build job targets a GitHub environment named after its channel (`preview`
-or `stable`). Stable macOS releases additionally require all of these secrets
-on the **stable environment**, rather than at repository scope:
+The fresh Apple-signing job targets the channel environment (`preview` or
+`stable`), and the isolated preview updater signer also runs behind the
+protected `preview` environment while reading the legacy repository secret.
+Stable macOS releases require all of these secrets on the protected **stable**
+environment, rather than at repository scope:
 
 - `ZERGLANG_APPLE_CERTIFICATE`: base64-encoded Developer ID Application `.p12`
 - `ZERGLANG_APPLE_CERTIFICATE_PASSWORD`: export password for that `.p12`
@@ -93,16 +111,36 @@ so Gatekeeper may warn users; stable publication fails closed when any Apple
 credential or notarization evidence is missing. Environment protection rules
 can require a human approval before the stable job receives those credentials.
 
-Enable GitHub Pages with **GitHub Actions** as its source. `GITHUB_TOKEN` is the
-only token used to create Releases, update updater manifests, and deploy Pages.
+Protect `preview`, `stable`, and `zerglang-updater-stable` so they deploy only
+from `main`; stable environments should require the release owner as reviewer
+and disable administrator bypass. Enable GitHub Pages with **GitHub Actions**
+as its source. `GITHUB_TOKEN` is the only token used to create Releases, update
+updater manifests, and deploy Pages.
 
 ## Manual recovery
 
-`workflow_dispatch` accepts a channel, version, and exact source SHA, but still
-requires the matching immutable tag to exist in `Epoch-ML/zerg`. It is for
-replaying a request delivery failure, not bypassing the source-tag contract.
+`workflow_dispatch` accepts only an existing
+`requests/<release-tag>.json` path. The request must still be byte-identical to
+its unique addition commit, that commit must add only the request, and the
+protected public tag must already target that exact request commit. Recovery
+cannot synthesize new provenance from manual channel/version/SHA inputs.
 
-GitHub Releases are treated as immutable. If publication stops after a Release
-is created but before the Pages manifest is committed, inspect the Release and
-its checksums before recovery; do not replace assets underneath an already
-published updater manifest.
+After reviewing the request and protected tag, an authorized operator starts
+or resumes it from `main` with:
+
+```bash
+gh workflow run release.yml --ref main \
+  -f request_file=requests/<release-tag>.json
+```
+
+GitHub Releases are draft-first and immutable. A retry resumes an exact draft
+and uploads only missing assets. A retry after publication accepts only an
+exact published release reporting `immutable: true`, ignores nondeterministic
+regenerated bytes, reconstructs the candidate from canonical public assets,
+and continues feed/Pages/live verification. Mutable published Releases fail
+closed.
+
+The historical `zerglang-ide-v0.1.1` request predates the dual-root source
+contract and is intentionally not a stable release candidate. The first stable
+request under this boundary must use a new source commit and version (planned
+as `0.1.2`) containing both channel public roots.

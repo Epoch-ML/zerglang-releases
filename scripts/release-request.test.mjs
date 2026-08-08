@@ -124,7 +124,7 @@ test("checks out only the requested source SHA instead of all monorepo refs", as
     'git -C source fetch --no-tags --depth=1 origin "$EXPECTED_SHA"',
   );
   const tagFetchIndex = workflow.indexOf(
-    'git -C source fetch --no-tags --depth=1 origin "$EXPECTED_REF:$EXPECTED_REF"',
+    '"$EXPECTED_REF:$EXPECTED_REF"',
   );
 
   assert.ok(initIndex >= 0, "release checkout must initialize an isolated source repository");
@@ -138,12 +138,12 @@ test("installs Rust quality components before enforcing them", async () => {
     "utf8",
   );
   const componentIndex = workflow.indexOf(
-    'rustup component add rustfmt clippy --toolchain "$RUST_TOOLCHAIN"',
+    '--component clippy,rustfmt --target aarch64-apple-darwin',
   );
   const formatIndex = workflow.indexOf(
     "cargo fmt --manifest-path src-tauri/Cargo.toml -- --check",
   );
-  const clippyIndex = workflow.indexOf("cargo clippy \\");
+  const clippyIndex = workflow.indexOf("cargo clippy --manifest-path");
 
   assert.ok(componentIndex >= 0, "release runner must provision rustfmt and clippy");
   assert.ok(formatIndex > componentIndex, "rustfmt must be installed before its gate runs");

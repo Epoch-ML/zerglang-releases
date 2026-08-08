@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
+import { promisify } from "node:util";
 
-import { readReleaseRequest } from "./release-request.mjs";
+import { readReleaseRequest, validateReleaseRequest } from "./release-request.mjs";
 
 const temporaryDirectories = [];
+const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
   await Promise.all(
@@ -61,4 +64,73 @@ test("rejects malformed and oversized request files before using their contents"
   const oversized = await fixture();
   await writeFile(oversized.requestPath, "x".repeat((16 * 1024) + 1));
   await assert.rejects(readReleaseRequest(oversized.requestPath), /exceeds 16384 bytes/);
+});
+
+test("accepts a valid request at the exact byte limit", async () => {
+  const bundle = await fixture();
+  const json = JSON.stringify(validRequest());
+  const bytes = `${json}${" ".repeat((16 * 1024) - Buffer.byteLength(json))}`;
+  await writeFile(bundle.requestPath, bytes);
+
+  assert.deepEqual(await readReleaseRequest(bundle.requestPath), validRequest());
+});
+
+test("rejects non-object, incomplete, and wrong-policy request values", () => {
+  for (const value of [null, [], "request", 7]) {
+    assert.throws(() => validateReleaseRequest(value), /must be a JSON object/);
+  }
+
+  for (const field of Object.keys(validRequest())) {
+    const incomplete = validRequest();
+    delete incomplete[field];
+    assert.throws(() => validateReleaseRequest(incomplete), /missing required field/);
+  }
+
+  for (const [field, value, message] of [
+    ["schema_version", 2, /schema_version must equal 1/],
+    ["product", "Other IDE", /product must equal ZergLang IDE/],
+    ["source_repository", "attacker/zerg", /source_repository must equal Epoch-ML\/zerg/],
+  ]) {
+    assert.throws(
+      () => validateReleaseRequest({ ...validRequest(), [field]: value }),
+      message,
+    );
+  }
+});
+
+test("rejects non-string, padded, and partially matched provenance", () => {
+  for (const [field, value, message] of [
+    ["version", null, /version must be a non-empty string/],
+    ["version", " 0.1.2", /version must not contain surrounding whitespace/],
+    ["version", "1x.2.3", /strict SemVer/],
+    ["version", "1.2x.3", /strict SemVer/],
+    ["version", "1.2.3x", /strict SemVer/],
+    ["version", "1.2.3trailing", /strict SemVer/],
+    ["version", "1.2.3-01", /strict SemVer/],
+    ["source_sha", `${validRequest().source_sha}0`, /40 lowercase hexadecimal/],
+    ["source_sha", `0${validRequest().source_sha}`, /40 lowercase hexadecimal/],
+    ["source_sha", " ", /source_sha must be a non-empty string/],
+    ["requested_at", `x${validRequest().requested_at}`, /ISO-8601 UTC timestamp/],
+    ["requested_at", `${validRequest().requested_at}x`, /ISO-8601 UTC timestamp/],
+    ["requested_at", " 2026-08-08T17:13:17.989Z", /surrounding whitespace/],
+  ]) {
+    const candidate = { ...validRequest(), [field]: value };
+    if (field === "version") {
+      candidate.release_tag = `zerglang-ide-v${value}`;
+      candidate.source_ref = `refs/tags/${candidate.release_tag}`;
+    }
+    assert.throws(() => validateReleaseRequest(candidate), message);
+  }
+});
+
+test("the command-line interface emits canonical JSON and fails on missing input", async () => {
+  const bundle = await fixture();
+  const script = new URL("./release-request.mjs", import.meta.url);
+  const success = await execFileAsync(process.execPath, [script.pathname, bundle.requestPath]);
+  assert.deepEqual(JSON.parse(success.stdout), validRequest());
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [script.pathname]),
+    (error) => error.code === 1 && /usage: release-request\.mjs REQUEST\.json/.test(error.stderr),
+  );
 });

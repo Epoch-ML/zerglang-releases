@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
@@ -7,10 +8,37 @@ const workflow = await readFile(
   "utf8",
 );
 
+test("commits two distinct canonical updater trust roots", async () => {
+  const preview = await readFile(
+    new URL("../keys/zerglang-preview-updater.pubkey", import.meta.url),
+  );
+  const stable = await readFile(
+    new URL("../keys/zerglang-stable-updater.pubkey", import.meta.url),
+  );
+  assert.notDeepEqual(preview, stable);
+  for (const key of [preview, stable]) {
+    const decoded = Buffer.from(key.toString("utf8").trim(), "base64").toString("utf8");
+    assert.match(decoded, /untrusted comment: minisign public key:/);
+    assert.match(decoded, /\nRWQ[A-Za-z0-9+/=]+\n$/);
+  }
+  assert.equal(
+    createHash("sha256").update(stable).digest("hex"),
+    "c173ac67c11b90089ab53b41a8d988108eccad0346118b50a8d28e5a84f7c9c4",
+  );
+});
+
+test("pins every GitHub-owned action to an immutable commit", () => {
+  const uses = [...workflow.matchAll(/^\s*-?\s*uses:\s*([^\s#]+)/gm)].map((match) => match[1]);
+  assert.ok(uses.length >= 10, "release workflow must declare its concrete action boundary");
+  for (const action of uses) {
+    assert.match(action, /^actions\/[a-z0-9-]+@[0-9a-f]{40}$/);
+  }
+});
+
 test("authenticates the GitHub metadata request used for strict SSH host keys", () => {
   const checkoutStep = workflow.slice(
-    workflow.indexOf("- name: Check out the exact source commit and tag"),
-    workflow.indexOf("- name: Verify source commit and release tag"),
+    workflow.indexOf("- name: Check out the exact source commit and matching tag"),
+    workflow.indexOf("- name: Delete the ephemeral source credential"),
   );
 
   assert.match(checkoutStep, /GH_TOKEN: \$\{\{ github\.token \}\}/);
@@ -42,18 +70,20 @@ test("manual recovery selects one existing immutable request and its protected t
   assert.match(validation, /GITHUB_REF.*refs\/heads\/main/);
   assert.match(validation, /git log --diff-filter=A --format=%H/);
   assert.match(validation, /the request addition commit must add only this request/);
-  assert.match(validation, /cmp .*request-at-addition/);
+  assert.match(validation, /cmp "\$request_path" "\$committed_request"/);
   assert.match(validation, /refs\/tags\/\$RELEASE_TAG/);
   assert.match(validation, /release tag targets .*expected.*REQUEST_COMMIT/i);
 });
 
 test("source, Apple, and updater signing execute on isolated trust boundaries", () => {
   const build = job("build", "apple_sign");
-  const apple = job("apple_sign", "sign_updater");
-  const updater = job("sign_updater", "publish");
+  const apple = job("apple_sign", "sign_updater_preview");
+  const previewUpdater = job("sign_updater_preview", "sign_updater_stable");
+  const stableUpdater = job("sign_updater_stable", "sign_updater");
+  const updater = previewUpdater + stableUpdater;
 
   assert.match(build, /Build without release signing credentials/);
-  assert.match(build, /--no-sign/);
+  assert.match(build, /createUpdaterArtifacts = false/);
   assert.match(build, /zerglang-unsigned-source-stage/);
   assert.doesNotMatch(build, /TAURI_SIGNING_PRIVATE_KEY/);
   assert.doesNotMatch(build, /ZERGLANG_APPLE_(?:CERTIFICATE|API_PRIVATE_KEY)/);
@@ -67,7 +97,7 @@ test("source, Apple, and updater signing execute on isolated trust boundaries", 
   assert.match(updater, /Sign the finished updater archive on a fresh runner/);
   assert.match(updater, /needs:[\s\S]*?- validate[\s\S]*?- apple_sign/);
   assert.match(updater, /zerglang-updater-stable/);
-  assert.match(updater, /zerglang-updater-preview/);
+  assert.match(previewUpdater, /environment: preview/);
   assert.match(updater, /ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY/);
   assert.match(updater, /secrets\.ZERGLANG_TAURI_SIGNING_PRIVATE_KEY/);
   assert.match(updater, /keys\/zerglang-stable-updater\.pubkey/);
@@ -75,6 +105,8 @@ test("source, Apple, and updater signing execute on isolated trust boundaries", 
   assert.match(updater, /cmp --silent .*updater\.pubkey/);
   assert.doesNotMatch(updater, /ZERGLANG_APPLE_(?:CERTIFICATE|API_PRIVATE_KEY)/);
   assert.doesNotMatch(updater, /SOURCE_DEPLOY_KEY/);
+  assert.doesNotMatch(previewUpdater, /ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY/);
+  assert.doesNotMatch(stableUpdater, /secrets\.ZERGLANG_TAURI_SIGNING_PRIVATE_KEY(?:_PASSWORD)?\s*\}\}/);
 });
 
 test("publication is draft-first, resumable, exact, and immutable before promotion", () => {
