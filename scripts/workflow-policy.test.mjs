@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
+
+import { parse, stringify } from "yaml";
 
 import {
   WorkflowPolicyError,
@@ -16,6 +21,41 @@ const policyWorkflow = await readFile(
   new URL("../.github/workflows/policy.yml", import.meta.url),
   "utf8",
 );
+const policyCli = fileURLToPath(new URL("./workflow-policy.mjs", import.meta.url));
+const releaseWorkflowPath = fileURLToPath(
+  new URL("../.github/workflows/release.yml", import.meta.url),
+);
+const policyWorkflowPath = fileURLToPath(
+  new URL("../.github/workflows/policy.yml", import.meta.url),
+);
+
+function workflowVariant(source, mutate) {
+  const workflow = parse(source);
+  mutate(workflow);
+  return stringify(workflow);
+}
+
+function releaseVariant(mutate) {
+  return workflowVariant(releaseWorkflow, mutate);
+}
+
+function policyVariant(mutate) {
+  return workflowVariant(policyWorkflow, mutate);
+}
+
+function findStep(workflow, jobName, stepName) {
+  const step = workflow.jobs[jobName].steps.find(
+    (candidate) => candidate.name === stepName,
+  );
+  assert.ok(step, `fixture step ${jobName}/${stepName} must exist`);
+  return step;
+}
+
+function replaceEveryJobToken(job, token) {
+  return JSON.parse(
+    JSON.stringify(job).replaceAll(token, "removed-public-policy-operation"),
+  );
+}
 
 function diagnosticIdentities(source) {
   return auditWorkflowPolicy(source).map(
@@ -23,11 +63,116 @@ function diagnosticIdentities(source) {
   );
 }
 
+function policyDiagnosticIdentities(source) {
+  return auditPolicyWorkflow(source).map(
+    ({ code, job, step }) => `${code}:${job}:${step ?? "job"}`,
+  );
+}
+
 test("rejects empty, malformed, and non-mapping workflow inputs", () => {
   for (const [source, message] of [
     ["", "workflow source must be non-empty text"],
+    [" \n\t", "workflow source must be non-empty text"],
     ["jobs: [", "workflow source must be valid YAML"],
     ["- job", "workflow root must be a mapping"],
+    ["null", "workflow root must be a mapping"],
+    ["42", "workflow root must be a mapping"],
+    ["workflow", "workflow root must be a mapping"],
+  ]) {
+    assert.throws(
+      () => auditWorkflowPolicy(source),
+      (error) =>
+        error instanceof WorkflowPolicyError &&
+        error.name === "WorkflowPolicyError" &&
+        error.message === message,
+    );
+  }
+
+  for (const source of [null, false, 42, [], {}]) {
+    assert.throws(
+      () => auditWorkflowPolicy(source),
+      (error) =>
+        error instanceof WorkflowPolicyError &&
+        error.message === "workflow source must be non-empty text",
+    );
+  }
+});
+
+test("rejects YAML aliases and duplicate keys at the parser boundary", () => {
+  assert.throws(
+    () => auditWorkflowPolicy("shared: &shared { runs-on: ubuntu }\njobs: { one: *shared }\n"),
+    /Alias resolution is disabled/,
+  );
+  assert.throws(
+    () => auditWorkflowPolicy("jobs: {}\njobs: {}\n"),
+    (error) =>
+      error instanceof WorkflowPolicyError &&
+      error.message === "workflow source must be valid YAML",
+  );
+});
+
+test("fails closed when release workflow containers have invalid YAML types", () => {
+  for (const [source, message] of [
+    ["on: null\njobs: {}\n", "workflow triggers must be a mapping"],
+    ["on: workflow_dispatch\njobs: {}\n", "workflow triggers must be a mapping"],
+    ["on: []\njobs: {}\n", "workflow triggers must be a mapping"],
+    ["on: {}\njobs: null\n", "workflow jobs must be a mapping"],
+    ["on: {}\njobs: invalid\n", "workflow jobs must be a mapping"],
+    ["on: {}\njobs: []\n", "workflow jobs must be a mapping"],
+    [
+      releaseVariant((workflow) => {
+        workflow.jobs.validate = [];
+      }),
+      "validate job must be a mapping",
+    ],
+    [
+      releaseVariant((workflow) => {
+        workflow.jobs.validate = null;
+      }),
+      "validate job must be a mapping",
+    ],
+    [
+      releaseVariant((workflow) => {
+        workflow.jobs.validate = "invalid";
+      }),
+      "validate job must be a mapping",
+    ],
+    [
+      releaseVariant((workflow) => {
+        workflow.jobs.validate.needs = 7;
+      }),
+      "job needs must be a string or string array",
+    ],
+    [
+      releaseVariant((workflow) => {
+        workflow.jobs.validate.needs = ["build", 7];
+      }),
+      "job needs must be a string or string array",
+    ],
+    [
+      releaseVariant((workflow) => {
+        workflow.jobs.sign_updater.steps = {};
+      }),
+      "sign_updater job steps must be an array",
+    ],
+    [
+      releaseVariant((workflow) => {
+        workflow.jobs.sign_updater.steps = [false];
+      }),
+      "sign_updater step 1 must be a mapping",
+    ],
+    [
+      releaseVariant((workflow) => {
+        workflow.jobs.sign_updater.steps = [null];
+      }),
+      "sign_updater step 1 must be a mapping",
+    ],
+    [
+      releaseVariant((workflow) => {
+        workflow.jobs.sign_updater.steps = ["invalid"];
+      }),
+      "sign_updater step 1 must be a mapping",
+    ],
   ]) {
     assert.throws(
       () => auditWorkflowPolicy(source),
@@ -38,6 +183,169 @@ test("rejects empty, malformed, and non-mapping workflow inputs", () => {
 
 test("accepts the release workflow's isolated credential boundaries", () => {
   assert.deepEqual(diagnosticIdentities(releaseWorkflow), []);
+});
+
+test("accepts protected environment objects and order-independent dependencies", () => {
+  const equivalent = releaseVariant((workflow) => {
+    workflow.jobs.build.environment = { name: "zerglang-source-read" };
+    workflow.jobs.sign_updater_preview.environment = { name: "preview" };
+    workflow.jobs.sign_updater_stable.environment = {
+      name: "zerglang-updater-stable",
+    };
+    workflow.jobs.apple_sign.needs.reverse();
+  });
+  assert.deepEqual(diagnosticIdentities(equivalent), []);
+});
+
+test("accepts additional secret-free jobs without steps and inert null values", () => {
+  const equivalent = releaseVariant((workflow) => {
+    workflow.jobs.documentation = {
+      "runs-on": "ubuntu-24.04",
+      permissions: { contents: "read" },
+      metadata: null,
+    };
+  });
+  assert.deepEqual(diagnosticIdentities(equivalent), []);
+});
+
+test("does not classify an unrelated step credential as an Apple key", () => {
+  const equivalent = releaseVariant((workflow) => {
+    workflow.jobs.validate.steps.push({
+      name: "Package with an unrelated credential",
+      env: { TOKEN: "${{ secrets.UNRELATED_SERVICE_TOKEN }}" },
+      run: "node scripts/package-macos.mjs",
+    });
+  });
+  assert.deepEqual(diagnosticIdentities(equivalent), []);
+});
+
+test("requires only the immutable request-file dispatch trigger", () => {
+  for (const hostile of [
+    releaseVariant((workflow) => {
+      delete workflow.on;
+    }),
+    releaseVariant((workflow) => {
+      workflow.on.push = {};
+    }),
+    releaseVariant((workflow) => {
+      workflow.on.workflow_dispatch = null;
+    }),
+    releaseVariant((workflow) => {
+      workflow.on.workflow_dispatch = "manual";
+    }),
+    releaseVariant((workflow) => {
+      workflow.on.workflow_dispatch = [];
+    }),
+    releaseVariant((workflow) => {
+      workflow.on.workflow_dispatch.inputs = null;
+    }),
+    releaseVariant((workflow) => {
+      workflow.on.workflow_dispatch.inputs = "request_file";
+    }),
+    releaseVariant((workflow) => {
+      workflow.on.workflow_dispatch.inputs = [];
+    }),
+    releaseVariant((workflow) => {
+      workflow.on.workflow_dispatch.inputs.extra = { required: false };
+    }),
+  ]) {
+    assert.deepEqual(diagnosticIdentities(hostile), [
+      "trigger-contract:workflow:job",
+    ]);
+  }
+});
+
+test("requires every release job, dependency edge, and public operation", () => {
+  const contracts = {
+    validate: {
+      needs: ["unexpected"],
+      tokens: [
+        "request_file",
+        "git log --diff-filter=A",
+        "the request addition commit must add only this request",
+        "refs/tags/$RELEASE_TAG",
+      ],
+    },
+    build: {
+      needs: ["validate", "unexpected"],
+      tokens: ["createUpdaterArtifacts = false", "zerglang-unsigned-source-stage"],
+    },
+    apple_sign: {
+      needs: ["build"],
+      tokens: ["zerglang-platform-signed"],
+    },
+    sign_updater_preview: {
+      needs: ["validate"],
+      tokens: ["zerglang-release-payload"],
+    },
+    sign_updater_stable: {
+      needs: ["apple_sign"],
+      tokens: ["zerglang-release-payload"],
+    },
+    sign_updater: {
+      needs: ["sign_updater_preview"],
+      tokens: [],
+    },
+    publish: {
+      needs: ["sign_updater"],
+      tokens: [
+        "--draft",
+        "--verify-tag",
+        "--draft=false",
+        ".immutable",
+        "zerglang-canonical-release",
+        "latest.json",
+      ],
+    },
+    feed: {
+      needs: ["publish"],
+      tokens: [
+        "scripts/feed-policy.mjs",
+        "zerglang-canonical-release",
+        "actions/upload-pages-artifact",
+      ],
+    },
+    deploy_pages: {
+      needs: ["validate"],
+      tokens: ["actions/deploy-pages"],
+    },
+    verify_live: {
+      needs: ["deploy_pages"],
+      tokens: ["https://epoch-ml.github.io/zerglang-releases", "latest.json"],
+    },
+  };
+
+  for (const [jobName, contract] of Object.entries(contracts)) {
+    const missing = releaseVariant((workflow) => {
+      delete workflow.jobs[jobName];
+    });
+    assert.deepEqual(diagnosticIdentities(missing), [
+      `job-contract:${jobName}:job`,
+    ]);
+
+    const wrongNeeds = releaseVariant((workflow) => {
+      workflow.jobs[jobName].needs = contract.needs;
+    });
+    assert.ok(
+      diagnosticIdentities(wrongNeeds).includes(`job-contract:${jobName}:job`),
+      `${jobName} must reject a changed dependency graph`,
+    );
+
+    for (const token of contract.tokens) {
+      const missingOperation = releaseVariant((workflow) => {
+        workflow.jobs[jobName] = replaceEveryJobToken(
+          workflow.jobs[jobName],
+          token,
+        );
+      });
+      assert.ok(
+        diagnosticIdentities(missingOperation).includes(
+          `job-contract:${jobName}:job`,
+        ),
+        `${jobName} must require ${token}`,
+      );
+    }
+  }
 });
 
 test("reports secrets at job scope and a missing source environment", () => {
@@ -54,6 +362,77 @@ test("reports secrets at job scope and a missing source environment", () => {
   ]);
 });
 
+test("requires every credential-bearing job to use its protected environment", () => {
+  for (const [jobName, environment] of [
+    ["build", "preview"],
+    ["sign_updater_preview", "zerglang-updater-stable"],
+    ["sign_updater_stable", "preview"],
+  ]) {
+    const hostile = releaseVariant((workflow) => {
+      workflow.jobs[jobName].environment = environment;
+    });
+    assert.deepEqual(diagnosticIdentities(hostile), [
+      `environment-boundary:${jobName}:job`,
+    ]);
+  }
+
+  for (const environment of [null, ["preview"]]) {
+    const hostile = releaseVariant((workflow) => {
+      workflow.jobs.sign_updater_preview.environment = environment;
+    });
+    assert.deepEqual(diagnosticIdentities(hostile), [
+      "environment-boundary:sign_updater_preview:job",
+    ]);
+  }
+});
+
+test("reports secrets anywhere outside the consuming step env", () => {
+  for (const mutate of [
+    (step) => {
+      step.run += "\necho '${{ secrets.ZERGLANG_APPLE_API_KEY_ID }}'";
+    },
+    (step) => {
+      step.with = {
+        token: "${{ secrets.ZERGLANG_APPLE_API_KEY_ID }}",
+      };
+    },
+  ]) {
+    const hostile = releaseVariant((workflow) => {
+      mutate(workflow.jobs.validate.steps[0]);
+    });
+    assert.deepEqual(diagnosticIdentities(hostile), [
+      "secret-outside-step-env:validate:Require protected main",
+    ]);
+  }
+});
+
+test("recognizes compact, padded, nested, and array-contained secret expressions", () => {
+  for (const secretExpression of [
+    "${{secrets.ZERGLANG_APPLE_API_KEY_ID}}",
+    "${{   secrets.ZERGLANG_APPLE_API_KEY_ID   }}",
+  ]) {
+    const hostile = releaseVariant((workflow) => {
+      workflow.jobs.validate.steps[0].with = {
+        nested: [{ token: secretExpression }],
+      };
+    });
+    assert.deepEqual(diagnosticIdentities(hostile), [
+      "secret-outside-step-env:validate:Require protected main",
+    ]);
+  }
+});
+
+test("reports the public step identity for nameless secret-bearing steps", () => {
+  const hostile = releaseVariant((workflow) => {
+    workflow.jobs.validate.steps.unshift({
+      run: "echo '${{ secrets.ZERGLANG_APPLE_API_KEY_ID }}'",
+    });
+  });
+  assert.deepEqual(diagnosticIdentities(hostile), [
+    "secret-outside-step-env:validate:step 1",
+  ]);
+});
+
 test("reports updater work while its private key is in scope", () => {
   const hostile = releaseWorkflow.replace(
     "          unset TAURI_PRIVATE_KEY TAURI_PRIVATE_KEY_PASSWORD",
@@ -65,6 +444,99 @@ test("reports updater work while its private key is in scope", () => {
   ]);
 });
 
+test("rejects every download, verification, and payload operation in an updater key window", () => {
+  for (const operation of [
+    "curl https://example.invalid/file",
+    "wget https://example.invalid/file",
+    "tar -tzf payload.tar.gz",
+    "sha256sum payload.tar.gz",
+    "minisign -Vm payload.tar.gz",
+    "node scripts/release-payload.mjs",
+  ]) {
+    const hostile = releaseVariant((workflow) => {
+      const step = findStep(
+        workflow,
+        "sign_updater_preview",
+        "Sign only the preview updater archive",
+      );
+      step.run += `\n${operation}`;
+    });
+    assert.deepEqual(diagnosticIdentities(hostile), [
+      "updater-secret-window:sign_updater_preview:Sign only the preview updater archive",
+    ]);
+  }
+});
+
+test("recognizes each updater credential independently at an exact command boundary", () => {
+  for (const secretName of [
+    "ZERGLANG_TAURI_SIGNING_PRIVATE_KEY",
+    "ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
+    "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY",
+    "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
+  ]) {
+    const hostile = releaseVariant((workflow) => {
+      workflow.jobs.validate.steps.push({
+        name: `Isolated ${secretName}`,
+        env: { SINGLE_SECRET: `\${{ secrets.${secretName} }}` },
+        run: "curl",
+      });
+    });
+    assert.deepEqual(diagnosticIdentities(hostile), [
+      `updater-secret-window:validate:Isolated ${secretName}`,
+    ]);
+  }
+});
+
+test("recognizes an updater network command after a shell command boundary", () => {
+  const hostile = releaseVariant((workflow) => {
+    workflow.jobs.validate.steps.push({
+      name: "Updater key across a shell boundary",
+      env: {
+        SINGLE_SECRET:
+          "${{ secrets.ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}",
+      },
+      run: "echo ready; curl",
+    });
+  });
+  assert.deepEqual(diagnosticIdentities(hostile), [
+    "updater-secret-window:validate:Updater key across a shell boundary",
+  ]);
+});
+
+test("rejects archive and metadata packaging in an Apple credential window", () => {
+  for (const operation of [
+    "node scripts/package-macos.mjs",
+    "cp source/platform-metadata.json output/platform-metadata.json",
+  ]) {
+    const hostile = releaseVariant((workflow) => {
+      const step = findStep(
+        workflow,
+        "apple_sign",
+        "Apply preview ad-hoc or fail-closed stable Apple signing",
+      );
+      step.run += `\n${operation}`;
+    });
+    assert.deepEqual(diagnosticIdentities(hostile), [
+      "apple-secret-window:apple_sign:Apply preview ad-hoc or fail-closed stable Apple signing",
+    ]);
+  }
+});
+
+test("recognizes one Apple credential without relying on companion secrets", () => {
+  const hostile = releaseVariant((workflow) => {
+    workflow.jobs.validate.steps.push({
+      name: "Isolated Apple credential",
+      env: {
+        APPLE_KEY: "${{ secrets.ZERGLANG_APPLE_API_PRIVATE_KEY }}",
+      },
+      run: "node scripts/package-macos.mjs",
+    });
+  });
+  assert.deepEqual(diagnosticIdentities(hostile), [
+    "apple-secret-window:validate:Isolated Apple credential",
+  ]);
+});
+
 test("reports the wrong channel signer mapping", () => {
   const hostile = releaseWorkflow.replace(
     "secrets.ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
@@ -73,6 +545,80 @@ test("reports the wrong channel signer mapping", () => {
   assert.deepEqual(diagnosticIdentities(hostile), [
     "updater-credential-contract:sign_updater_preview:Sign only the preview updater archive",
   ]);
+});
+
+test("requires exactly one updater signer step per channel", () => {
+  for (const jobName of ["sign_updater_preview", "sign_updater_stable"]) {
+    const missing = releaseVariant((workflow) => {
+      const signer = workflow.jobs[jobName].steps.findIndex((step) =>
+        typeof step.name === "string" && step.name.startsWith("Sign only the")
+      );
+      workflow.jobs[jobName].steps.splice(signer, 1);
+    });
+    assert.deepEqual(diagnosticIdentities(missing), [
+      `updater-credential-contract:${jobName}:job`,
+    ]);
+
+    const duplicate = releaseVariant((workflow) => {
+      const signer = workflow.jobs[jobName].steps.find((step) =>
+        typeof step.name === "string" && step.name.startsWith("Sign only the")
+      );
+      workflow.jobs[jobName].steps.push(structuredClone(signer));
+    });
+    assert.deepEqual(diagnosticIdentities(duplicate), [
+      `updater-credential-contract:${jobName}:job`,
+    ]);
+  }
+});
+
+test("requires each channel signer to receive both exact keys, sign once, and unset", () => {
+  const cases = [
+    (step) => {
+      step.env.TAURI_PRIVATE_KEY = "${{ secrets.ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY }}";
+    },
+    (step) => {
+      step.env.TAURI_PRIVATE_KEY_PASSWORD = "ordinary-text";
+    },
+    (step) => {
+      step.run = step.run.replace(
+        "npm exec --offline -- tauri signer sign release-input/ZergLang.app.tar.gz",
+        "echo skipped-signing",
+      );
+    },
+    (step) => {
+      step.run = step.run.replace(
+        "unset TAURI_PRIVATE_KEY TAURI_PRIVATE_KEY_PASSWORD",
+        "echo kept-credentials",
+      );
+    },
+  ];
+  for (const mutate of cases) {
+    const hostile = releaseVariant((workflow) => {
+      mutate(findStep(
+        workflow,
+        "sign_updater_preview",
+        "Sign only the preview updater archive",
+      ));
+    });
+    assert.deepEqual(diagnosticIdentities(hostile), [
+      "updater-credential-contract:sign_updater_preview:Sign only the preview updater archive",
+    ]);
+  }
+});
+
+test("fails the signer contract when a credential-bearing step has no shell program", () => {
+  for (const run of [null, 42]) {
+    const hostile = releaseVariant((workflow) => {
+      findStep(
+        workflow,
+        "sign_updater_preview",
+        "Sign only the preview updater archive",
+      ).run = run;
+    });
+    assert.deepEqual(diagnosticIdentities(hostile), [
+      "updater-credential-contract:sign_updater_preview:Sign only the preview updater archive",
+    ]);
+  }
 });
 
 test("reports an unpinned action, mutable publication, and synthetic dispatch", () => {
@@ -95,6 +641,72 @@ test("reports an unpinned action, mutable publication, and synthetic dispatch", 
   ]);
 });
 
+test("requires every GitHub-owned action to use a lowercase 40-character commit", () => {
+  for (const uses of [
+    "actions/checkout@v7",
+    `actions/checkout@${"a".repeat(39)}`,
+    `actions/checkout@${"a".repeat(41)}`,
+    `actions/checkout@${"A".repeat(40)}`,
+  ]) {
+    const hostile = releaseVariant((workflow) => {
+      workflow.jobs.validate.steps[1].uses = uses;
+    });
+    assert.deepEqual(diagnosticIdentities(hostile), [
+      `unpinned-action:validate:uses ${uses}`,
+    ]);
+  }
+
+  const thirdParty = releaseVariant((workflow) => {
+    workflow.jobs.sign_updater.steps.push({
+      uses: "epoch-ml/local-policy@v1",
+    });
+  });
+  assert.deepEqual(diagnosticIdentities(thirdParty), []);
+});
+
+test("sorts multiple diagnostics by their public identity", () => {
+  const hostile = releaseVariant((workflow) => {
+    workflow.jobs.validate.steps.push({
+      uses: "actions/checkout@v7",
+      with: { token: "${{ secrets.ZERGLANG_APPLE_API_KEY_ID }}" },
+    });
+  });
+  assert.deepEqual(diagnosticIdentities(hostile), [
+    "secret-outside-step-env:validate:uses actions/checkout@v7",
+    "unpinned-action:validate:uses actions/checkout@v7",
+  ]);
+});
+
+test("sorts same-code diagnostics by their public step identity", () => {
+  const hostile = releaseVariant((workflow) => {
+    workflow.jobs.validate.steps.push(
+      { uses: "actions/z-last@v1" },
+      { uses: "actions/a-first@v1" },
+    );
+  });
+  assert.deepEqual(diagnosticIdentities(hostile), [
+    "unpinned-action:validate:uses actions/a-first@v1",
+    "unpinned-action:validate:uses actions/z-last@v1",
+  ]);
+});
+
+test("sorts a job-level signer diagnostic before its step diagnostic", () => {
+  const hostile = releaseVariant((workflow) => {
+    workflow.jobs.sign_updater_preview.steps.push({
+      name: "Extra partial signer",
+      env: {
+        TAURI_PRIVATE_KEY:
+          "${{ secrets.ZERGLANG_TAURI_SIGNING_PRIVATE_KEY }}",
+      },
+      run: "echo incomplete signer",
+    });
+  });
+  assert.deepEqual(diagnosticIdentities(hostile), [
+    "updater-credential-contract:sign_updater_preview:job",
+    "updater-credential-contract:sign_updater_preview:Extra partial signer",
+  ]);
+});
+
 test("requires pull-request CI to execute every public policy gate", () => {
   assert.deepEqual(
     auditPolicyWorkflow(policyWorkflow).map(
@@ -113,4 +725,219 @@ test("requires pull-request CI to execute every public policy gate", () => {
     ),
     ["policy-ci-contract:policy:job"],
   );
+});
+
+test("requires the exact policy-CI trigger, branch, permissions, and secret-free boundary", () => {
+  const variants = [
+    policyVariant((workflow) => {
+      delete workflow.on;
+    }),
+    policyVariant((workflow) => {
+      workflow.on.push = {};
+    }),
+    policyVariant((workflow) => {
+      workflow.on.pull_request = null;
+    }),
+    policyVariant((workflow) => {
+      workflow.on.pull_request = "main";
+    }),
+    policyVariant((workflow) => {
+      workflow.on.pull_request = [];
+    }),
+    policyVariant((workflow) => {
+      workflow.on.pull_request.branches = "main";
+    }),
+    policyVariant((workflow) => {
+      workflow.on.pull_request.branches.push("release");
+    }),
+    policyVariant((workflow) => {
+      workflow.permissions = "read-all";
+    }),
+    policyVariant((workflow) => {
+      workflow.permissions = null;
+    }),
+    policyVariant((workflow) => {
+      workflow.permissions = ["contents:read"];
+    }),
+    policyVariant((workflow) => {
+      workflow.permissions.contents = "write";
+    }),
+    policyVariant((workflow) => {
+      workflow.permissions.actions = "read";
+    }),
+    policyVariant((workflow) => {
+      workflow.jobs.policy.env = {
+        TOKEN: "${{ secrets.ZERGLANG_APPLE_API_KEY_ID }}",
+      };
+    }),
+    policyVariant((workflow) => {
+      workflow.jobs.policy.steps.push({
+        run: "echo safe",
+        env: { TOKEN: "${{secrets.ZERGLANG_APPLE_API_KEY_ID}}" },
+      });
+    }),
+  ];
+  for (const hostile of variants) {
+    assert.deepEqual(policyDiagnosticIdentities(hostile), [
+      "policy-ci-contract:policy:job",
+    ]);
+  }
+
+  const equivalent = policyVariant((workflow) => {
+    workflow.jobs.policy.metadata = null;
+  });
+  assert.deepEqual(policyDiagnosticIdentities(equivalent), []);
+});
+
+test("requires the policy job and every exact public CI operation", () => {
+  const missingJob = policyVariant((workflow) => {
+    delete workflow.jobs.policy;
+  });
+  assert.deepEqual(policyDiagnosticIdentities(missingJob), [
+    "policy-ci-contract:policy:job",
+  ]);
+
+  const invalidJob = policyVariant((workflow) => {
+    workflow.jobs.policy = [];
+  });
+  assert.throws(
+    () => auditPolicyWorkflow(invalidJob),
+    (error) =>
+      error instanceof WorkflowPolicyError &&
+      error.message === "policy job must be a mapping",
+  );
+
+  for (const token of [
+    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+    "npm ci --ignore-scripts --no-audit --no-fund",
+    "npm audit --audit-level=moderate",
+    "npm test",
+    "node scripts/workflow-policy.mjs .github/workflows/release.yml",
+    "node scripts/workflow-policy.mjs .github/workflows/policy.yml --policy-ci",
+    "actionlint_1.7.12_linux_amd64.tar.gz",
+    "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
+    "git diff --check",
+  ]) {
+    const hostile = policyWorkflow.replaceAll(
+      token,
+      "removed-public-policy-operation",
+    );
+    assert.deepEqual(
+      policyDiagnosticIdentities(hostile),
+      ["policy-ci-contract:policy:job"],
+      `policy CI must require ${token}`,
+    );
+  }
+});
+
+test("fails closed when policy workflow containers have invalid YAML types", () => {
+  for (const [source, message] of [
+    ["on: null\njobs: {}\n", "policy workflow triggers must be a mapping"],
+    ["on: pull_request\njobs: {}\n", "policy workflow triggers must be a mapping"],
+    ["on: []\njobs: {}\n", "policy workflow triggers must be a mapping"],
+    ["on: {}\njobs: null\n", "policy workflow jobs must be a mapping"],
+    ["on: {}\njobs: invalid\n", "policy workflow jobs must be a mapping"],
+    ["on: {}\njobs: []\n", "policy workflow jobs must be a mapping"],
+  ]) {
+    assert.throws(
+      () => auditPolicyWorkflow(source),
+      (error) => error instanceof WorkflowPolicyError && error.message === message,
+    );
+  }
+});
+
+test("CLI selects the release or policy audit and exposes exit status as a gate", () => {
+  const releaseResult = spawnSync(
+    process.execPath,
+    [policyCli, releaseWorkflowPath],
+    { encoding: "utf8" },
+  );
+  assert.equal(releaseResult.status, 0);
+  assert.equal(releaseResult.stderr, "");
+  assert.deepEqual(JSON.parse(releaseResult.stdout), { diagnostics: [] });
+
+  const policyResult = spawnSync(
+    process.execPath,
+    [policyCli, policyWorkflowPath, "--policy-ci"],
+    { encoding: "utf8" },
+  );
+  assert.equal(policyResult.status, 0);
+  assert.equal(policyResult.stderr, "");
+  assert.deepEqual(JSON.parse(policyResult.stdout), { diagnostics: [] });
+});
+
+test("CLI returns one for policy violations in either mode", async () => {
+  const directory = await mkdtemp(`${tmpdir()}/zerglang-workflow-policy-`);
+  try {
+    const releasePath = `${directory}/release.yml`;
+    const policyPath = `${directory}/policy.yml`;
+    await writeFile(
+      releasePath,
+      releaseVariant((workflow) => {
+        workflow.on.workflow_dispatch.inputs = {};
+      }),
+    );
+    await writeFile(
+      policyPath,
+      policyVariant((workflow) => {
+        workflow.permissions.contents = "write";
+      }),
+    );
+
+    const releaseResult = spawnSync(process.execPath, [policyCli, releasePath], {
+      encoding: "utf8",
+    });
+    assert.equal(releaseResult.status, 1);
+    assert.deepEqual(JSON.parse(releaseResult.stdout).diagnostics.map(
+      ({ code, job }) => `${code}:${job}`,
+    ), ["trigger-contract:workflow"]);
+
+    const policyResult = spawnSync(
+      process.execPath,
+      [policyCli, policyPath, "--policy-ci"],
+      { encoding: "utf8" },
+    );
+    assert.equal(policyResult.status, 1);
+    assert.deepEqual(JSON.parse(policyResult.stdout).diagnostics.map(
+      ({ code, job }) => `${code}:${job}`,
+    ), ["policy-ci-contract:policy"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("CLI rejects invalid arguments and malformed workflow input", async () => {
+  for (const args of [
+    [],
+    [releaseWorkflowPath, "--unknown-mode"],
+    [releaseWorkflowPath, "--policy-ci", "extra"],
+  ]) {
+    const result = spawnSync(process.execPath, [policyCli, ...args], {
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /^workflow-policy: usage: workflow-policy\.mjs WORKFLOW\.yml \[--policy-ci]\n$/,
+    );
+    assert.equal(result.stdout, "");
+  }
+
+  const directory = await mkdtemp(`${tmpdir()}/zerglang-workflow-policy-`);
+  try {
+    const malformedPath = `${directory}/malformed.yml`;
+    await writeFile(malformedPath, "jobs: [\n");
+    const result = spawnSync(process.execPath, [policyCli, malformedPath], {
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 1);
+    assert.equal(
+      result.stderr,
+      "workflow-policy: workflow source must be valid YAML\n",
+    );
+    assert.equal(result.stdout, "");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

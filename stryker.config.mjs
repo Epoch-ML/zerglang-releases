@@ -5,6 +5,7 @@ export default {
     "scripts/release-payload.mjs",
     "scripts/release-request.mjs",
     "scripts/source-stage.mjs",
+    "scripts/workflow-policy.mjs",
   ],
   testRunner: "command",
   commandRunner: {
