@@ -175,6 +175,7 @@ jobs:
         env:
           EXPECTED_REF: ${{ needs.validate.outputs.source_ref }}
           EXPECTED_SHA: ${{ needs.validate.outputs.source_sha }}
+          GH_TOKEN: ${{ github.token }}
           SOURCE_DEPLOY_KEY: ${{ secrets.ZERG_SOURCE_DEPLOY_KEY }}
         shell: bash
         run: |
@@ -189,7 +190,10 @@ jobs:
 
           umask 077
           printf '%s\n' "$SOURCE_DEPLOY_KEY" >"$key_path"
-          curl --fail --silent --show-error --location --retry 3 \
+          curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
             --proto '=https' --tlsv1.2 \
             https://api.github.com/meta >"$github_meta_path"
           jq -er \
