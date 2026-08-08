@@ -666,12 +666,12 @@ jobs:
           path: release-input
       - name: Sign and collect the preview payload
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.ZERGLANG_TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_PRIVATE_KEY: ${{ secrets.ZERGLANG_TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_PRIVATE_KEY_PASSWORD: ${{ secrets.ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         shell: bash
         run: |
           set -euo pipefail
-          [[ -n "$TAURI_SIGNING_PRIVATE_KEY" && -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]] || {
+          [[ -n "$TAURI_PRIVATE_KEY" && -n "$TAURI_PRIVATE_KEY_PASSWORD" ]] || {
             echo "::error::preview updater signing identity is incomplete"
             exit 1
           }
@@ -737,12 +737,12 @@ jobs:
           path: release-input
       - name: Sign and collect the stable payload
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_PRIVATE_KEY: ${{ secrets.ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_PRIVATE_KEY_PASSWORD: ${{ secrets.ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         shell: bash
         run: |
           set -euo pipefail
-          [[ -n "$TAURI_SIGNING_PRIVATE_KEY" && -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]] || {
+          [[ -n "$TAURI_PRIVATE_KEY" && -n "$TAURI_PRIVATE_KEY_PASSWORD" ]] || {
             echo "::error::stable updater signing identity is incomplete"
             exit 1
           }
