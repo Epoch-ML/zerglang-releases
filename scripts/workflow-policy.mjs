@@ -55,6 +55,19 @@ function collectSecretNames(value, names = new Set()) {
   return names;
 }
 
+function collectSecretNamesOutsideStepEnv(step) {
+  const names = new Set();
+  for (const [key, value] of Object.entries(step)) {
+    if (key !== "env") collectSecretNames(value, names);
+  }
+  return names;
+}
+
+function jobContainsContractToken(serializedJob, token) {
+  if (token !== "--draft") return serializedJob.includes(token);
+  return /(?:^|[^A-Za-z0-9_-])--draft(?=$|[^A-Za-z0-9_=-])/.test(serializedJob);
+}
+
 function environmentName(job) {
   if (typeof job.environment === "string") return job.environment;
   if (
@@ -240,7 +253,9 @@ export function auditWorkflowPolicy(source) {
       );
     }
     const serializedJob = JSON.stringify(requiredJob);
-    if (contract.tokens.some((token) => !serializedJob.includes(token))) {
+    if (
+      contract.tokens.some((token) => !jobContainsContractToken(serializedJob, token))
+    ) {
       addDiagnostic(
         diagnostics,
         "job-contract",
@@ -296,7 +311,7 @@ export function auditWorkflowPolicy(source) {
     for (const [index, rawStep] of job.steps.entries()) {
       const step = requireMapping(rawStep, `${jobName} step ${index + 1}`);
       const secretNames = collectSecretNames(step.env ?? {});
-      const allStepSecretNames = collectSecretNames(step);
+      const secretNamesOutsideEnv = collectSecretNamesOutsideStepEnv(step);
       const run = typeof step.run === "string" ? step.run : "";
       const stepName = typeof step.name === "string"
         ? step.name
@@ -316,9 +331,7 @@ export function auditWorkflowPolicy(source) {
           "GitHub-owned actions must be pinned to a full commit SHA",
         );
       }
-      if (
-        [...allStepSecretNames].some((name) => !secretNames.has(name))
-      ) {
+      if (secretNamesOutsideEnv.size > 0) {
         addDiagnostic(
           diagnostics,
           "secret-outside-step-env",
