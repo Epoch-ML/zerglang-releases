@@ -174,7 +174,7 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           npm test
 
-      - name: Check out the exact source commit and matching tag
+      - name: Fetch exact source objects with one read key
         env:
           EXPECTED_REF: ${{ needs.validate.outputs.source_ref }}
           EXPECTED_SHA: ${{ needs.validate.outputs.source_sha }}
@@ -192,8 +192,13 @@ jobs:
           install -d -m 700 "$secure_dir"
           key_path="$secure_dir/deploy-key"
           known_hosts="$secure_dir/known-hosts"
+          cleanup() {
+            rm -f "$key_path"
+          }
+          trap cleanup EXIT
           install -m 600 /dev/null "$key_path"
           printf '%s\n' "$SOURCE_DEPLOY_KEY" >"$key_path"
+          unset SOURCE_DEPLOY_KEY
           curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
             --header "Authorization: Bearer $GH_TOKEN" \
             --header 'Accept: application/vnd.github+json' \
@@ -201,20 +206,32 @@ jobs:
             --proto '=https' --tlsv1.2 \
             https://api.github.com/meta \
             | jq -er '.ssh_keys[] | "github.com " + .' >"$known_hosts"
+          unset GH_TOKEN
           chmod 600 "$known_hosts"
           ssh_command="ssh -i $key_path -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts"
-          git init --ref-format=reftable source
-          git -C source remote add origin "git@github.com:${SOURCE_REPOSITORY}.git"
-          GIT_SSH_COMMAND="$ssh_command" git -C source fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
-          GIT_SSH_COMMAND="$ssh_command" git -C source fetch --no-tags --depth=1 origin \
+          git init --ref-format=reftable source-git
+          git -C source-git remote add origin "git@github.com:${SOURCE_REPOSITORY}.git"
+          GIT_SSH_COMMAND="$ssh_command" git -C source-git fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
+          GIT_SSH_COMMAND="$ssh_command" git -C source-git fetch --no-tags --depth=1 origin \
             "$EXPECTED_REF:$EXPECTED_REF"
-          git -C source checkout --detach "$EXPECTED_SHA"
-          [[ "$(git -C source rev-parse HEAD)" == "$EXPECTED_SHA" ]]
-          [[ "$(git -C source rev-parse "${EXPECTED_REF}^{commit}")" == "$EXPECTED_SHA" ]]
+          [[ "$(git -C source-git rev-parse "${EXPECTED_REF}^{commit}")" == "$EXPECTED_SHA" ]]
+          git -C source-git cat-file -e "${EXPECTED_SHA}^{commit}"
+          unset ssh_command
+          cleanup
+          trap - EXIT
 
       - name: Delete the ephemeral source credential
         if: always()
         run: rm -f "$RUNNER_TEMP/zerglang-source-ssh/deploy-key"
+
+      - name: Materialize verified source without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir source
+          git -C source-git archive "$ZERGLANG_SOURCE_SHA" | tar -x -C source
+          [[ -f source/zerglang/CMakeLists.txt ]]
+          [[ -f source/zerglang/ide/package-lock.json ]]
 
       - name: Require independent committed channel trust roots
         shell: bash
@@ -907,6 +924,8 @@ jobs:
       ((needs.sign_updater_preview.result == 'success' && needs.sign_updater_stable.result == 'skipped') ||
        (needs.sign_updater_preview.result == 'skipped' && needs.sign_updater_stable.result == 'success'))
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
       - name: Record successful signer isolation
         run: echo 'Exactly one channel signer produced the release payload.'
