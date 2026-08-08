@@ -16,6 +16,9 @@ const EXPECTED_ENVIRONMENTS = Object.freeze({
       "ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
     ]),
     refs: Object.freeze(["branch:main"]),
+    reviewers: Object.freeze(["User:1042757"]),
+    prevent_self_review: false,
+    wait_timer: null,
   }),
   stable: Object.freeze({
     secrets: Object.freeze([
@@ -27,18 +30,30 @@ const EXPECTED_ENVIRONMENTS = Object.freeze({
       "ZERGLANG_APPLE_SIGNING_IDENTITY",
     ]),
     refs: Object.freeze(["branch:main"]),
+    reviewers: Object.freeze(["User:1042757"]),
+    prevent_self_review: false,
+    wait_timer: null,
   }),
   "zerglang-apple-preview": Object.freeze({
     secrets: Object.freeze([]),
     refs: Object.freeze(["branch:main"]),
+    reviewers: Object.freeze([]),
+    prevent_self_review: null,
+    wait_timer: null,
   }),
   "zerglang-feed": Object.freeze({
     secrets: Object.freeze(["ZERGLANG_FEED_DEPLOY_KEY"]),
     refs: Object.freeze(["branch:main"]),
+    reviewers: Object.freeze([]),
+    prevent_self_review: null,
+    wait_timer: null,
   }),
   "zerglang-source-read": Object.freeze({
     secrets: Object.freeze(["ZERG_SOURCE_DEPLOY_KEY"]),
     refs: Object.freeze(["branch:main"]),
+    reviewers: Object.freeze(["User:1042757"]),
+    prevent_self_review: false,
+    wait_timer: null,
   }),
   "zerglang-updater-stable": Object.freeze({
     secrets: Object.freeze([
@@ -46,10 +61,16 @@ const EXPECTED_ENVIRONMENTS = Object.freeze({
       "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
     ]),
     refs: Object.freeze(["branch:main"]),
+    reviewers: Object.freeze(["User:1042757"]),
+    prevent_self_review: false,
+    wait_timer: null,
   }),
   "github-pages": Object.freeze({
     secrets: Object.freeze([]),
     refs: Object.freeze(["branch:main"]),
+    reviewers: Object.freeze([]),
+    prevent_self_review: null,
+    wait_timer: null,
   }),
 });
 
@@ -88,6 +109,24 @@ const EXPECTED_RULESETS = Object.freeze([
     bypass: Object.freeze([]),
     rules: Object.freeze(["deletion", "non_fast_forward"]),
   }),
+  Object.freeze({
+    name: "Release tag authority",
+    refs: Object.freeze([
+      "refs/tags/zerglang-ide-preview-v*",
+      "refs/tags/zerglang-ide-v*",
+    ]),
+    bypass: Object.freeze(["User:1042757"]),
+    rules: Object.freeze(["creation"]),
+  }),
+  Object.freeze({
+    name: "Release tag immutability",
+    refs: Object.freeze([
+      "refs/tags/zerglang-ide-preview-v*",
+      "refs/tags/zerglang-ide-v*",
+    ]),
+    bypass: Object.freeze([]),
+    rules: Object.freeze(["deletion", "update"]),
+  }),
 ]);
 
 const EXPECTED_SOURCE_RULESETS = Object.freeze([
@@ -113,6 +152,36 @@ const EXPECTED_SOURCE_RULESETS = Object.freeze([
       "required_status_checks:ZergLang release policy:15368:strict",
     ]),
   }),
+  Object.freeze({
+    name: "Desktop release tag authority",
+    refs: Object.freeze([
+      "refs/tags/colony-desktop-preview-v*",
+      "refs/tags/colony-desktop-v*",
+      "refs/tags/zde-preview-v*",
+      "refs/tags/zde-v*",
+      "refs/tags/zerglang-ide-preview-v*",
+      "refs/tags/zerglang-ide-v*",
+      "refs/tags/zterm-preview-v*",
+      "refs/tags/zterm-v*",
+    ]),
+    bypass: Object.freeze(["User:1042757"]),
+    rules: Object.freeze(["creation"]),
+  }),
+  Object.freeze({
+    name: "Desktop release tag immutability",
+    refs: Object.freeze([
+      "refs/tags/colony-desktop-preview-v*",
+      "refs/tags/colony-desktop-v*",
+      "refs/tags/zde-preview-v*",
+      "refs/tags/zde-v*",
+      "refs/tags/zerglang-ide-preview-v*",
+      "refs/tags/zerglang-ide-v*",
+      "refs/tags/zterm-preview-v*",
+      "refs/tags/zterm-v*",
+    ]),
+    bypass: Object.freeze([]),
+    rules: Object.freeze(["deletion", "update"]),
+  }),
 ]);
 
 const EXPECTED_SOURCE_ENVIRONMENT = Object.freeze({
@@ -121,6 +190,9 @@ const EXPECTED_SOURCE_ENVIRONMENT = Object.freeze({
     "tag:zerglang-ide-preview-v*",
     "tag:zerglang-ide-v*",
   ]),
+  reviewers: Object.freeze([]),
+  prevent_self_review: null,
+  wait_timer: null,
 });
 
 export class RepositoryPreflightError extends Error {
@@ -166,6 +238,15 @@ function rulesetMatches(actual, expected) {
     equalStrings(actual.refs, expected.refs) &&
     equalStrings(actual.bypass, expected.bypass) &&
     equalStrings(actual.rules, expected.rules);
+}
+
+function environmentMatches(actual, expected) {
+  return actual !== undefined &&
+    equalStrings(actual.secrets, expected.secrets) &&
+    equalStrings(actual.refs, expected.refs) &&
+    equalStrings(actual.reviewers, expected.reviewers) &&
+    actual.prevent_self_review === expected.prevent_self_review &&
+    actual.wait_timer === expected.wait_timer;
 }
 
 function isBoundedFeedBranch(feedBranch) {
@@ -272,14 +353,10 @@ export function auditRepositoryState(state, { phase } = {}) {
   );
   for (const [name, expected] of Object.entries(EXPECTED_ENVIRONMENTS)) {
     const actual = environments[name];
-    if (
-      actual === undefined ||
-      !equalStrings(actual.secrets, expected.secrets) ||
-      !equalStrings(actual.refs, expected.refs)
-    ) {
+    if (!environmentMatches(actual, expected)) {
       errors.push(diagnostic(
       "environment-contract",
-      `${name} environment secrets or ref policy differ`,
+      `${name} environment credentials, refs, or protection rules differ`,
       ));
     }
   }
@@ -314,14 +391,9 @@ export function auditRepositoryState(state, { phase } = {}) {
   );
   const sourceRequestEnvironment = sourceEnvironments["zerglang-release-request"];
   if (
-    sourceRequestEnvironment === undefined ||
-    !equalStrings(
-      sourceRequestEnvironment.secrets,
-      EXPECTED_SOURCE_ENVIRONMENT.secrets,
-    ) ||
-    !equalStrings(
-      sourceRequestEnvironment.refs,
-      EXPECTED_SOURCE_ENVIRONMENT.refs,
+    !environmentMatches(
+      sourceRequestEnvironment,
+      EXPECTED_SOURCE_ENVIRONMENT,
     )
   ) {
     errors.push(diagnostic(
@@ -465,6 +537,38 @@ async function collectEnvironments(request, repository, response) {
   const environments = {};
   const records = Array.isArray(response.environments) ? response.environments : [];
   for (const record of records.sort((left, right) => left.name.localeCompare(right.name))) {
+    const protectionRules = Array.isArray(record.protection_rules)
+      ? record.protection_rules
+      : [];
+    const reviewerRules = protectionRules.filter(
+      (rule) => rule?.type === "required_reviewers",
+    );
+    const waitTimerRules = protectionRules.filter(
+      (rule) => rule?.type === "wait_timer",
+    );
+    const reviewers = reviewerRules.flatMap((rule) =>
+      Array.isArray(rule.reviewers)
+        ? rule.reviewers.flatMap((reviewer) => {
+            const type = reviewer?.type;
+            const id = reviewer?.reviewer?.id;
+            return typeof type === "string" && Number.isSafeInteger(id)
+              ? [`${type}:${id}`]
+              : [];
+          })
+        : []
+    );
+    const preventSelfReview = reviewerRules.length === 0
+      ? null
+      : reviewerRules.length === 1 &&
+          typeof reviewerRules[0].prevent_self_review === "boolean"
+        ? reviewerRules[0].prevent_self_review
+        : "invalid";
+    const waitTimer = waitTimerRules.length === 0
+      ? null
+      : waitTimerRules.length === 1 &&
+          Number.isSafeInteger(waitTimerRules[0].wait_timer)
+        ? waitTimerRules[0].wait_timer
+        : "invalid";
     const secrets = await request({
       repository,
       path: `environments/${encodeURIComponent(record.name)}/secrets`,
@@ -482,6 +586,9 @@ async function collectEnvironments(request, repository, response) {
           `${policy.type}:${policy.name}`
         ).sort()
         : [],
+      reviewers: reviewers.sort(),
+      prevent_self_review: preventSelfReview,
+      wait_timer: waitTimer,
     };
   }
   return environments;
