@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   auditRepositoryState,
   collectRepositoryState,
+  RepositoryPreflightError,
+  requestGitHub,
 } from "./repository-preflight.mjs";
 
 const RELEASE_ENVIRONMENTS = {
@@ -174,6 +176,10 @@ function healthyState(workflowState = "disabled_manually") {
   };
 }
 
+function errorCodes(state, phase = "cutover") {
+  return auditRepositoryState(state, { phase }).errors.map(({ code }) => code);
+}
+
 test("accepts the exact disabled cutover topology and reports only human-review debt", () => {
   const result = auditRepositoryState(healthyState(), { phase: "cutover" });
   assert.deepEqual(result.errors, []);
@@ -288,6 +294,162 @@ test("keeps source request handoff free of write credentials", () => {
         message: "source request write credentials must be absent",
       },
     ],
+  );
+});
+
+test("fails malformed phases and repository state through the public error type", () => {
+  assert.throws(
+    () => auditRepositoryState(healthyState(), { phase: "preview" }),
+    (error) =>
+      error instanceof RepositoryPreflightError &&
+      error.name === "RepositoryPreflightError" &&
+      error.message === "phase must be cutover or live",
+  );
+  for (const state of [null, [], { release: null, source: {} }]) {
+    assert.throws(
+      () => auditRepositoryState(state, { phase: "cutover" }),
+      RepositoryPreflightError,
+    );
+  }
+});
+
+test("enforces every environment, workflow, key, and ruleset identity", () => {
+  for (const name of Object.keys(RELEASE_ENVIRONMENTS)) {
+    const state = healthyState();
+    state.release.environments[name].refs = [];
+    assert.deepEqual(errorCodes(state), ["environment-contract"]);
+  }
+
+  const missingReleaseWorkflow = healthyState();
+  missingReleaseWorkflow.release.workflows = [];
+  assert.deepEqual(errorCodes(missingReleaseWorkflow), ["workflow-state"]);
+
+  const wrongFeedKey = healthyState();
+  wrongFeedKey.release.deployKeys[0].verified = false;
+  assert.deepEqual(errorCodes(wrongFeedKey), ["deploy-key"]);
+
+  const wrongSourceKey = healthyState();
+  wrongSourceKey.source.deployKeys[0].title = "unrelated key";
+  assert.deepEqual(errorCodes(wrongSourceKey), ["source-key"]);
+
+  for (const owner of ["release", "source"]) {
+    for (const index of healthyState()[owner].rulesets.keys()) {
+      const state = healthyState();
+      state[owner].rulesets[index].refs = [];
+      assert.deepEqual(
+        errorCodes(state),
+        [owner === "release" ? "ruleset-contract" : "source-ruleset-contract"],
+      );
+    }
+  }
+});
+
+test("enforces every bounded release-data branch invariant", () => {
+  const mutations = [
+    (branch) => { branch.name = "main"; },
+    (branch) => { branch.sha = `x${"a".repeat(40)}`; },
+    (branch) => { branch.tree_sha = `${"b".repeat(40)}x`; },
+    (branch) => { branch.truncated = true; },
+    (branch) => { branch.entries = []; },
+    (branch) => { branch.entries.push(structuredClone(branch.entries[0])); },
+    (branch) => { branch.entries[0].mode = "100644"; },
+    (branch) => { branch.entries[1].path = "outside/policy.mjs"; },
+    (branch) => { branch.entries[1].mode = "100755"; },
+    (branch) => { branch.entries[1].type = "commit"; },
+    (branch) => { branch.entries[1].path = `site/${"x".repeat(508)}`; },
+    (branch) => {
+      branch.entries = branch.entries.filter(
+        ({ path }) => path !== "site/index.html",
+      );
+    },
+  ];
+  for (const mutate of mutations) {
+    const state = healthyState();
+    mutate(state.release.feedBranch);
+    assert.deepEqual(errorCodes(state), ["feed-branch-contract"]);
+  }
+
+  const exactLimit = healthyState();
+  while (exactLimit.release.feedBranch.entries.length < 4_096) {
+    const index = exactLimit.release.feedBranch.entries.length;
+    exactLimit.release.feedBranch.entries.push({
+      path: `site/generated/${index}.json`,
+      mode: "100644",
+      type: "blob",
+    });
+  }
+  assert.equal(errorCodes(exactLimit).includes("feed-branch-contract"), false);
+  exactLimit.release.feedBranch.entries.push({
+    path: "site/generated/overflow.json",
+    mode: "100644",
+    type: "blob",
+  });
+  assert.deepEqual(errorCodes(exactLimit), ["feed-branch-contract"]);
+});
+
+test("uses one authenticated read-only GitHub request boundary", async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ enabled: true }),
+    };
+  };
+  const result = await requestGitHub(
+    {
+      repository: "Epoch-ML/zerglang-releases",
+      path: "immutable-releases",
+      apiVersion: "2026-03-10",
+    },
+    { token: "test-token", fetchImpl },
+  );
+  assert.deepEqual(result, { enabled: true });
+  assert.deepEqual(calls, [
+    {
+      url: "https://api.github.com/repos/Epoch-ML/zerglang-releases/immutable-releases",
+      options: {
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: "Bearer test-token",
+          "X-GitHub-Api-Version": "2026-03-10",
+        },
+      },
+    },
+  ]);
+});
+
+test("handles only an explicitly allowed missing GitHub resource", async () => {
+  const fetchImpl = async () => ({
+    ok: false,
+    status: 404,
+    json: async () => ({ message: "Not Found" }),
+  });
+  assert.equal(
+    await requestGitHub(
+      {
+        repository: "Epoch-ML/zerglang-releases",
+        path: "branches/release-data",
+        allowNotFound: true,
+      },
+      { token: "test-token", fetchImpl },
+    ),
+    null,
+  );
+  await assert.rejects(
+    requestGitHub(
+      { repository: "Epoch-ML/zerglang-releases", path: "rulesets" },
+      { token: "test-token", fetchImpl },
+    ),
+    /GitHub API Epoch-ML\/zerglang-releases\/rulesets returned 404/,
+  );
+  await assert.rejects(
+    requestGitHub(
+      { repository: "Epoch-ML/zerglang-releases", path: "rulesets" },
+      { token: "", fetchImpl },
+    ),
+    /GH_TOKEN is required for repository preflight/,
   );
 });
 
