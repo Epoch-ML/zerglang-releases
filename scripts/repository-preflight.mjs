@@ -115,6 +115,11 @@ const EXPECTED_SOURCE_RULESETS = Object.freeze([
   }),
 ]);
 
+const EXPECTED_SOURCE_ENVIRONMENT = Object.freeze({
+  secrets: Object.freeze([]),
+  branches: Object.freeze(["zerglang"]),
+});
+
 export class RepositoryPreflightError extends Error {
   constructor(message) {
     super(message);
@@ -298,6 +303,36 @@ export function auditRepositoryState(state, { phase } = {}) {
     errors.push(diagnostic(
       "source-key",
       "the ZergLang source deploy key must be verified and read-only",
+    ));
+  }
+  const sourceEnvironments = requireObject(
+    source.environments,
+    "source environments",
+  );
+  const sourceRequestEnvironment = sourceEnvironments["zerglang-release-request"];
+  if (
+    sourceRequestEnvironment === undefined ||
+    !equalStrings(
+      sourceRequestEnvironment.secrets,
+      EXPECTED_SOURCE_ENVIRONMENT.secrets,
+    ) ||
+    !equalStrings(
+      sourceRequestEnvironment.branches,
+      EXPECTED_SOURCE_ENVIRONMENT.branches,
+    )
+  ) {
+    errors.push(diagnostic(
+      "source-environment-contract",
+      "zerglang-release-request must be secret-free and branch-scoped",
+    ));
+  }
+  if (
+    Array.isArray(source.repositorySecrets) &&
+    source.repositorySecrets.includes("ZERGLANG_RELEASES_DEPLOY_KEY")
+  ) {
+    errors.push(diagnostic(
+      "source-repository-secret",
+      "source request write credentials must be absent",
     ));
   }
   if (Array.isArray(release.repositorySecrets) && release.repositorySecrets.length > 0) {
@@ -533,6 +568,19 @@ export async function collectRepositoryState({
     repository: sourceRepository,
     path: "actions/workflows",
   });
+  const sourceEnvironmentResponse = await request({
+    repository: sourceRepository,
+    path: "environments",
+  });
+  const sourceEnvironments = await collectEnvironments(
+    request,
+    sourceRepository,
+    sourceEnvironmentResponse,
+  );
+  const sourceRepositorySecretsResponse = await request({
+    repository: sourceRepository,
+    path: "actions/secrets",
+  });
   const sourceKeys = await request({ repository: sourceRepository, path: "keys" });
   const sourceRulesetResponse = await request({
     repository: sourceRepository,
@@ -562,6 +610,10 @@ export async function collectRepositoryState({
     source: {
       workflows: Array.isArray(sourceWorkflows.workflows)
         ? sourceWorkflows.workflows.map(({ path, state }) => ({ path, state }))
+        : [],
+      environments: sourceEnvironments,
+      repositorySecrets: Array.isArray(sourceRepositorySecretsResponse.secrets)
+        ? sourceRepositorySecretsResponse.secrets.map((secret) => secret.name).sort()
         : [],
       deployKeys: Array.isArray(sourceKeys) ? sourceKeys : [],
       rulesets: sourceRulesets,
