@@ -15,6 +15,9 @@ const RELEASE_ENVIRONMENTS = {
       "ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
     ],
     refs: ["branch:main"],
+    reviewers: ["User:1042757"],
+    prevent_self_review: false,
+    wait_timer: null,
   },
   stable: {
     secrets: [
@@ -26,15 +29,27 @@ const RELEASE_ENVIRONMENTS = {
       "ZERGLANG_APPLE_SIGNING_IDENTITY",
     ],
     refs: ["branch:main"],
+    reviewers: ["User:1042757"],
+    prevent_self_review: false,
+    wait_timer: null,
   },
-  "zerglang-apple-preview": { secrets: [], refs: ["branch:main"] },
+  "zerglang-apple-preview": {
+    secrets: [], refs: ["branch:main"], reviewers: [],
+    prevent_self_review: null, wait_timer: null,
+  },
   "zerglang-feed": {
     secrets: ["ZERGLANG_FEED_DEPLOY_KEY"],
     refs: ["branch:main"],
+    reviewers: [],
+    prevent_self_review: null,
+    wait_timer: null,
   },
   "zerglang-source-read": {
     secrets: ["ZERG_SOURCE_DEPLOY_KEY"],
     refs: ["branch:main"],
+    reviewers: ["User:1042757"],
+    prevent_self_review: false,
+    wait_timer: null,
   },
   "zerglang-updater-stable": {
     secrets: [
@@ -42,8 +57,14 @@ const RELEASE_ENVIRONMENTS = {
       "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
     ],
     refs: ["branch:main"],
+    reviewers: ["User:1042757"],
+    prevent_self_review: false,
+    wait_timer: null,
   },
-  "github-pages": { secrets: [], refs: ["branch:main"] },
+  "github-pages": {
+    secrets: [], refs: ["branch:main"], reviewers: [],
+    prevent_self_review: null, wait_timer: null,
+  },
 };
 
 function healthyState(workflowState = "disabled_manually") {
@@ -123,6 +144,24 @@ function healthyState(workflowState = "disabled_manually") {
           bypass: [],
           rules: ["deletion", "non_fast_forward"],
         },
+        {
+          name: "Release tag authority",
+          refs: [
+            "refs/tags/zerglang-ide-preview-v*",
+            "refs/tags/zerglang-ide-v*",
+          ],
+          bypass: ["User:1042757"],
+          rules: ["creation"],
+        },
+        {
+          name: "Release tag immutability",
+          refs: [
+            "refs/tags/zerglang-ide-preview-v*",
+            "refs/tags/zerglang-ide-v*",
+          ],
+          bypass: [],
+          rules: ["deletion", "update"],
+        },
       ],
     },
     source: {
@@ -146,6 +185,9 @@ function healthyState(workflowState = "disabled_manually") {
             "tag:zerglang-ide-preview-v*",
             "tag:zerglang-ide-v*",
           ],
+          reviewers: [],
+          prevent_self_review: null,
+          wait_timer: null,
         },
       },
       repositorySecrets: [],
@@ -171,6 +213,36 @@ function healthyState(workflowState = "disabled_manually") {
             "required_linear_history",
             "required_status_checks:ZergLang release policy:15368:strict",
           ],
+        },
+        {
+          name: "Desktop release tag authority",
+          refs: [
+            "refs/tags/colony-desktop-preview-v*",
+            "refs/tags/colony-desktop-v*",
+            "refs/tags/zde-preview-v*",
+            "refs/tags/zde-v*",
+            "refs/tags/zerglang-ide-preview-v*",
+            "refs/tags/zerglang-ide-v*",
+            "refs/tags/zterm-preview-v*",
+            "refs/tags/zterm-v*",
+          ],
+          bypass: ["User:1042757"],
+          rules: ["creation"],
+        },
+        {
+          name: "Desktop release tag immutability",
+          refs: [
+            "refs/tags/colony-desktop-preview-v*",
+            "refs/tags/colony-desktop-v*",
+            "refs/tags/zde-preview-v*",
+            "refs/tags/zde-v*",
+            "refs/tags/zerglang-ide-preview-v*",
+            "refs/tags/zerglang-ide-v*",
+            "refs/tags/zterm-preview-v*",
+            "refs/tags/zterm-v*",
+          ],
+          bypass: [],
+          rules: ["deletion", "update"],
         },
       ],
     },
@@ -393,6 +465,52 @@ test("enforces every environment, workflow, key, and ruleset identity", () => {
   }
 });
 
+test("requires exact environment reviewers, self-review, and wait timers", () => {
+  for (const mutate of [
+    (environment) => { environment.reviewers = []; },
+    (environment) => { environment.reviewers = ["Team:42"]; },
+    (environment) => { environment.prevent_self_review = true; },
+    (environment) => { environment.wait_timer = 5; },
+  ]) {
+    const state = healthyState();
+    mutate(state.release.environments.preview);
+    assert.deepEqual(errorCodes(state), ["environment-contract"]);
+  }
+
+  const unexpectedReviewer = healthyState();
+  unexpectedReviewer.release.environments["zerglang-feed"].reviewers = [
+    "User:1042757",
+  ];
+  assert.deepEqual(errorCodes(unexpectedReviewer), ["environment-contract"]);
+
+  const sourceReviewer = healthyState();
+  sourceReviewer.source.environments["zerglang-release-request"].reviewers = [
+    "User:1042757",
+  ];
+  assert.deepEqual(errorCodes(sourceReviewer), ["source-environment-contract"]);
+});
+
+test("requires exact source and release tag authority and immutability rules", () => {
+  for (const [owner, name, expectedCode] of [
+    ["release", "Release tag authority", "ruleset-contract"],
+    ["release", "Release tag immutability", "ruleset-contract"],
+    ["source", "Desktop release tag authority", "source-ruleset-contract"],
+    ["source", "Desktop release tag immutability", "source-ruleset-contract"],
+  ]) {
+    const missing = healthyState();
+    missing[owner].rulesets = missing[owner].rulesets.filter(
+      (ruleset) => ruleset.name !== name,
+    );
+    assert.deepEqual(errorCodes(missing), [expectedCode], name);
+
+    const extraPattern = healthyState();
+    extraPattern[owner].rulesets.find(
+      (ruleset) => ruleset.name === name,
+    ).refs.push("refs/tags/*");
+    assert.deepEqual(errorCodes(extraPattern), [expectedCode], name);
+  }
+});
+
 test("enforces every bounded release-data branch invariant", () => {
   const mutations = [
     (branch) => { branch.name = "main"; },
@@ -581,7 +699,23 @@ test("collects settings through one injected read-only HTTP boundary", async () 
     ],
     [
       "Epoch-ML/zerglang-releases:environments",
-      { environments: [{ name: "zerglang-feed" }] },
+      {
+        environments: [{
+          name: "zerglang-feed",
+          protection_rules: [
+            { type: "branch_policy" },
+            {
+              type: "required_reviewers",
+              prevent_self_review: false,
+              reviewers: [
+                { type: "User", reviewer: { id: 1042757 } },
+                { type: "Team", reviewer: { id: 42 } },
+              ],
+            },
+            { type: "wait_timer", wait_timer: 15 },
+          ],
+        }],
+      },
     ],
     [
       "Epoch-ML/zerglang-releases:environments/zerglang-feed/secrets",
@@ -713,6 +847,9 @@ test("collects settings through one injected read-only HTTP boundary", async () 
         "zerglang-feed": {
           secrets: ["A_SECRET", "Z_SECRET"],
           refs: ["branch:main"],
+          reviewers: ["Team:42", "User:1042757"],
+          prevent_self_review: false,
+          wait_timer: 15,
         },
       },
       repositorySecrets: ["A_REPOSITORY", "Z_REPOSITORY"],
@@ -744,6 +881,9 @@ test("collects settings through one injected read-only HTTP boundary", async () 
             "tag:zerglang-ide-preview-v*",
             "tag:zerglang-ide-v*",
           ],
+          reviewers: [],
+          prevent_self_review: null,
+          wait_timer: null,
         },
       },
       repositorySecrets: [],
