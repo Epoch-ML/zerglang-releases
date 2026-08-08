@@ -73,9 +73,9 @@ async function fixture() {
   return { root, remote, seed, data, canonical, sentinel, main };
 }
 
-async function writeCanonical(directory, version) {
+async function writeCanonical(directory, version, channel = "stable") {
   const latest = `${JSON.stringify({ version, platforms: {} }, null, 2)}\n`;
-  const metadata = `${JSON.stringify({ version, channel: "stable" }, null, 2)}\n`;
+  const metadata = `${JSON.stringify({ version, channel }, null, 2)}\n`;
   await writeFile(join(directory, "latest.json"), latest);
   await writeFile(join(directory, "release-metadata.json"), metadata);
   return { latest, metadata };
@@ -207,6 +207,25 @@ test("is idempotent and rejects a concurrent release-data advance", async () => 
   });
 });
 
+test("prepares the preview channel under its distinct tag and paths", async () => {
+  const bundle = await fixture();
+  await writeCanonical(bundle.canonical, "2.1.0-preview.3", "preview");
+
+  const prepared = await prepareFeedPromotion({
+    dataDirectory: bundle.data,
+    releaseDirectory: bundle.canonical,
+    channel: "preview",
+    version: "2.1.0-preview.3",
+    releaseTag: "zerglang-ide-preview-v2.1.0-preview.3",
+  });
+
+  assert.equal(prepared.status, "committed");
+  assert.deepEqual(prepared.changedPaths, [
+    "site/preview/latest.json",
+    "site/preview/releases/2.1.0-preview.3.json",
+  ]);
+});
+
 test("rejects any target other than release-data", async () => {
   const bundle = await fixture();
   await assert.rejects(
@@ -248,6 +267,32 @@ test("rejects invalid roots, branches, tags, and dirty input state", async () =>
       releaseTag: "zerglang-ide-v3.0.0",
     }),
     /release-data checkout must be a real directory/,
+  );
+  const emptyDirectory = join(missing.root, "empty-directory");
+  await mkdir(emptyDirectory);
+  await assert.rejects(
+    prepareFeedPromotion({
+      dataDirectory: emptyDirectory,
+      releaseDirectory: missing.canonical,
+      channel: "stable",
+      version: "3.0.0",
+      releaseTag: "zerglang-ide-v3.0.0",
+    }),
+    (error) =>
+      error instanceof FeedPromotionError &&
+      error.message.startsWith("git rev-parse failed:"),
+  );
+  const nestedRoot = join(missing.data, "nested");
+  await mkdir(nestedRoot);
+  await assert.rejects(
+    prepareFeedPromotion({
+      dataDirectory: nestedRoot,
+      releaseDirectory: missing.canonical,
+      channel: "stable",
+      version: "3.0.0",
+      releaseTag: "zerglang-ide-v3.0.0",
+    }),
+    /release-data checkout must be the Git worktree root/,
   );
   const linked = join(missing.root, "linked-data");
   await symlink(missing.data, linked, "dir");
@@ -301,6 +346,25 @@ test("rejects invalid roots, branches, tags, and dirty input state", async () =>
     }),
     /release-data checkout must start clean: unexpected\.txt/,
   );
+
+  const renamed = await fixture();
+  await writeCanonical(renamed.canonical, "3.0.0");
+  await git(
+    renamed.data,
+    "mv",
+    "scripts/feed-policy.mjs",
+    "scripts/renamed-policy.mjs",
+  );
+  await assert.rejects(
+    prepareFeedPromotion({
+      dataDirectory: renamed.data,
+      releaseDirectory: renamed.canonical,
+      channel: "stable",
+      version: "3.0.0",
+      releaseTag: "zerglang-ide-v3.0.0",
+    }),
+    /feed promotion must not rename or copy paths/,
+  );
 });
 
 test("validates push authority, parent identity, cleanliness, and ancestry", async () => {
@@ -338,6 +402,17 @@ test("validates push authority, parent identity, cleanliness, and ancestry", asy
       /expected parent must be an exact commit SHA/,
     );
   }
+  await assert.rejects(
+    pushFeedPromotion({
+      dataDirectory: unchangedBundle.data,
+      remote: join(unchangedBundle.root, "absent-remote.git"),
+      branch: "release-data",
+      expectedParent: initial,
+    }),
+    (error) =>
+      error instanceof FeedPromotionError &&
+      error.message.startsWith("git ls-remote failed:"),
+  );
 
   const dirty = await fixture();
   const dirtyParent = await git(dirty.data, "rev-parse", "HEAD");
@@ -419,4 +494,18 @@ test("exposes prepare and push through a bounded command-line interface", async 
       error.code === 1 &&
       /usage: feed-promotion\.mjs prepare/.test(error.stderr),
   );
+
+  for (const args of [
+    ["unknown", bundle.data, bundle.canonical, "stable", "5.0.0", "zerglang-ide-v5.0.0"],
+    ["prepare", bundle.data, bundle.canonical, "stable", "5.0.0"],
+    ["unknown", bundle.data, bundle.remote, "release-data", record.parent],
+    ["push", bundle.data, bundle.remote, "release-data"],
+  ]) {
+    await assert.rejects(
+      run(process.execPath, [commandPath, ...args]),
+      (error) =>
+        error.code === 1 &&
+        /usage: feed-promotion\.mjs prepare/.test(error.stderr),
+    );
+  }
 });
