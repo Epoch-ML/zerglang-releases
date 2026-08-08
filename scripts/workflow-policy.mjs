@@ -1071,11 +1071,29 @@ export function auditPolicyWorkflow(source) {
   const safePermissions = permissions !== null && typeof permissions === "object" &&
     !Array.isArray(permissions) &&
     Object.keys(permissions).length === 1 && permissions.contents === "read";
+  const policyActions = policy !== null && Array.isArray(policy.steps)
+    ? policy.steps
+      .filter((step) => step !== null && typeof step === "object" &&
+        !Array.isArray(step) && typeof step.uses === "string")
+      .map((step) => action(step.uses, step.with ?? null))
+    : [];
+  const expectedPolicyActions = [
+    action(CHECKOUT_ACTION, { "persist-credentials": false }),
+    action(SETUP_NODE_ACTION, { "node-version": "22.23.2", cache: "npm" }),
+  ];
   const valid = arraysEqual(Object.keys(triggers).sort(), ["pull_request"]) &&
     arraysEqual(branchNames, ["main"]) &&
     safePermissions &&
+    arraysEqual(Object.keys(jobs), ["policy"]) &&
     policy !== null &&
-    collectSecretNames(workflow).size === 0 &&
+    policy["runs-on"] === "ubuntu-24.04" &&
+    policy.environment === undefined &&
+    policy.permissions === undefined &&
+    policy.uses === undefined &&
+    policy.secrets === undefined &&
+    Array.isArray(policy.steps) && policy.steps.length === 3 &&
+    JSON.stringify(policyActions) === JSON.stringify(expectedPolicyActions) &&
+    collectSecretReferences(workflow).length === 0 &&
     requiredTokens.every((token) => serialized.includes(token));
   return valid
     ? []
