@@ -86,7 +86,7 @@ credential is held by the one protected environment whose job needs it.
 
 | Location | Secret / setting | Scope |
 |---|---|---|
-| `Epoch-ML/zerg` `zerglang-release-request` environment | none | Secret-free handoff, restricted to the `zerglang` branch; it uploads only the reviewed request artifact. |
+| `Epoch-ML/zerg` `zerglang-release-request` environment | none | Secret-free handoff, restricted to `zerglang-ide-v*` and `zerglang-ide-preview-v*` tags; it uploads only the reviewed request artifact. |
 | `zerglang-source-read` environment | `ZERG_SOURCE_DEPLOY_KEY` | Private key whose public half is a **read-only** deploy key on `Epoch-ML/zerg`; it may only fetch the exact source commit and tag. |
 | `preview` environment | `ZERGLANG_TAURI_SIGNING_PRIVATE_KEY` | Preview-only Tauri updater private key. |
 | `preview` environment | `ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the preview-only updater key. |
