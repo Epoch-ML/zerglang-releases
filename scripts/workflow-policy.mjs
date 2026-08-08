@@ -95,6 +95,13 @@ function isAppleSecret(name) {
   return name.startsWith("ZERGLANG_APPLE_");
 }
 
+function isFeedSecret(name) {
+  return name === "ZERGLANG_FEED_DEPLOY_KEY";
+}
+
+const APPLE_ENVIRONMENT =
+  "${{ needs.validate.outputs.channel == 'stable' && 'stable' || 'zerglang-apple-preview' }}";
+
 const UPDATER_JOB_POLICY = Object.freeze({
   sign_updater_preview: Object.freeze({
     environment: "preview",
@@ -121,6 +128,9 @@ const JOB_CONTRACTS = Object.freeze({
   build: Object.freeze({
     needs: Object.freeze(["validate"]),
     tokens: Object.freeze([
+      'git -C source fetch --no-tags --depth=1 origin \\"$EXPECTED_SHA\\"',
+      '\\"$EXPECTED_REF:$EXPECTED_REF\\"',
+      "--component clippy,rustfmt",
       "createUpdaterArtifacts = false",
       "zerglang-unsigned-source-stage",
     ]),
@@ -129,12 +139,23 @@ const JOB_CONTRACTS = Object.freeze({
     needs: Object.freeze(["build", "validate"]),
     tokens: Object.freeze(["zerglang-platform-signed"]),
   }),
-  sign_updater_preview: Object.freeze({
+  signed_smoke: Object.freeze({
     needs: Object.freeze(["apple_sign", "validate"]),
+    tokens: Object.freeze([
+      "codesign --verify",
+      "xcrun stapler validate",
+      "spctl --assess",
+      "run --tier=interpreter",
+      "run --tier=jit",
+      "build --emit=object",
+    ]),
+  }),
+  sign_updater_preview: Object.freeze({
+    needs: Object.freeze(["signed_smoke", "validate"]),
     tokens: Object.freeze(["zerglang-release-payload"]),
   }),
   sign_updater_stable: Object.freeze({
-    needs: Object.freeze(["apple_sign", "validate"]),
+    needs: Object.freeze(["signed_smoke", "validate"]),
     tokens: Object.freeze(["zerglang-release-payload"]),
   }),
   sign_updater: Object.freeze({
@@ -155,7 +176,8 @@ const JOB_CONTRACTS = Object.freeze({
   feed: Object.freeze({
     needs: Object.freeze(["publish", "validate"]),
     tokens: Object.freeze([
-      "scripts/feed-policy.mjs",
+      "release-data",
+      "policy/scripts/feed-promotion.mjs",
       "zerglang-canonical-release",
       "actions/upload-pages-artifact",
     ]),
@@ -196,6 +218,20 @@ function updaterStepDoesPostSignWork(run) {
 function appleStepDoesPostSignWork(run) {
   return run.includes("scripts/package-macos.mjs") ||
     run.includes("platform-metadata.json");
+}
+
+function executesProductCode(run) {
+  return /(?:^|[\s"'])\$?zlc(?:[\s"']|$)/m.test(run) ||
+    run.includes("run --tier=interpreter") ||
+    run.includes("run --tier=jit") ||
+    run.includes("build --emit=object");
+}
+
+function executesPulledFeedPolicy(step, run) {
+  const workingDirectory = step["working-directory"];
+  return /git\s+pull[^\n]*(?:\s|\/)main(?:\s|$)/m.test(run) ||
+    /(?:node|npm|npx|bash|sh)\s+(?:\.\/)?data\//m.test(run) ||
+    workingDirectory === "data";
 }
 
 export function auditWorkflowPolicy(source) {
@@ -278,6 +314,70 @@ export function auditWorkflowPolicy(source) {
       );
     }
 
+    if (jobName === "apple_sign" && environmentName(job) !== APPLE_ENVIRONMENT) {
+      addDiagnostic(
+        diagnostics,
+        "environment-boundary",
+        jobName,
+        null,
+        "Apple signing must select only stable or zerglang-apple-preview",
+      );
+    }
+    if (jobName === "signed_smoke" && environmentName(job) !== undefined) {
+      addDiagnostic(
+        diagnostics,
+        "environment-boundary",
+        jobName,
+        null,
+        "signed smoke must run without a protected environment",
+      );
+    }
+    if (jobName === "feed" && environmentName(job) !== "zerglang-feed") {
+      addDiagnostic(
+        diagnostics,
+        "environment-boundary",
+        jobName,
+        null,
+        "feed promotion must use only zerglang-feed",
+      );
+    }
+    if (
+      jobName === "feed" &&
+      JSON.stringify(job.permissions ?? null) !== JSON.stringify({ contents: "read" })
+    ) {
+      addDiagnostic(
+        diagnostics,
+        "permission-boundary",
+        jobName,
+        null,
+        "feed promotion must not receive a repository write token",
+      );
+    }
+
+    if (jobName === "feed") {
+      const serializedFeed = JSON.stringify(job);
+      const hasReleaseDataPush = Array.isArray(job.steps) && job.steps.some((step) =>
+        step !== null && typeof step === "object" && !Array.isArray(step) &&
+        typeof step.run === "string" &&
+        step.run.includes("policy/scripts/feed-promotion.mjs push") &&
+        step.run.includes("release-data")
+      );
+      if (
+        !serializedFeed.includes("release-data") ||
+        !hasReleaseDataPush ||
+        serializedFeed.includes("HEAD:main") ||
+        serializedFeed.includes("origin main")
+      ) {
+        addDiagnostic(
+          diagnostics,
+          "feed-authority",
+          jobName,
+          null,
+          "feed promotion may update only release-data",
+        );
+      }
+    }
+
     const updaterPolicy = UPDATER_JOB_POLICY[jobName];
     if (
       updaterPolicy !== undefined &&
@@ -308,6 +408,7 @@ export function auditWorkflowPolicy(source) {
       throw new WorkflowPolicyError(`${jobName} job steps must be an array`);
     }
     let updaterSignerCount = 0;
+    let feedCredentialCount = 0;
     for (const [index, rawStep] of job.steps.entries()) {
       const step = requireMapping(rawStep, `${jobName} step ${index + 1}`);
       const secretNames = collectSecretNames(step.env ?? {});
@@ -339,6 +440,52 @@ export function auditWorkflowPolicy(source) {
           stepName,
           "secret expressions are permitted only in the env of their consuming step",
         );
+      }
+      if (jobName === "apple_sign" && executesProductCode(run)) {
+        addDiagnostic(
+          diagnostics,
+          "product-execution-boundary",
+          jobName,
+          stepName,
+          "Apple signing jobs must not execute source-produced programs",
+        );
+      }
+      if (jobName === "signed_smoke" && secretNames.size > 0) {
+        addDiagnostic(
+          diagnostics,
+          "signed-smoke-credential",
+          jobName,
+          stepName,
+          "signed smoke must execute without credentials",
+        );
+      }
+      if (jobName === "feed" && executesPulledFeedPolicy(step, run)) {
+        addDiagnostic(
+          diagnostics,
+          "feed-policy-boundary",
+          jobName,
+          stepName,
+          "feed promotion must execute only the immutable policy checkout",
+        );
+      }
+      if (jobName === "feed" && [...secretNames].some(isFeedSecret)) {
+        feedCredentialCount += 1;
+        const env = requireMapping(step.env, "feed credential env");
+        if (
+          env.FEED_DEPLOY_KEY !==
+            "${{ secrets.ZERGLANG_FEED_DEPLOY_KEY }}" ||
+          !run.includes("unset FEED_DEPLOY_KEY") ||
+          !run.includes("policy/scripts/feed-promotion.mjs push") ||
+          !run.includes("release-data")
+        ) {
+          addDiagnostic(
+            diagnostics,
+            "feed-credential-contract",
+            jobName,
+            stepName,
+            "the feed deploy key may only push one prepared release-data commit",
+          );
+        }
       }
       if (updaterPolicy !== undefined && [...secretNames].some(isUpdaterSecret)) {
         updaterSignerCount += 1;
@@ -388,6 +535,15 @@ export function auditWorkflowPolicy(source) {
         jobName,
         null,
         `${jobName} must contain exactly one credential-bearing signer step`,
+      );
+    }
+    if (jobName === "feed" && feedCredentialCount !== 1) {
+      addDiagnostic(
+        diagnostics,
+        "feed-credential-contract",
+        jobName,
+        null,
+        "feed must contain exactly one credential-bearing push step",
       );
     }
   }

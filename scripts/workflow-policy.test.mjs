@@ -96,6 +96,11 @@ function cutoverReleaseVariant(mutate = () => {}) {
           run: "git clone --branch release-data --single-branch https://github.com/Epoch-ML/zerglang-releases.git data",
         },
         {
+          uses:
+            "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+          with: { name: "zerglang-canonical-release", path: "canonical" },
+        },
+        {
           name: "Prepare the monotonic release-data commit",
           run: "node policy/scripts/feed-promotion.mjs prepare data canonical stable 1.2.3",
         },
@@ -460,11 +465,28 @@ test("requires every release job, dependency edge, and public operation", () => 
     },
     build: {
       needs: ["validate", "unexpected"],
-      tokens: ["createUpdaterArtifacts = false", "zerglang-unsigned-source-stage"],
+      tokens: [
+        'git -C source fetch --no-tags --depth=1 origin \\"$EXPECTED_SHA\\"',
+        '\\"$EXPECTED_REF:$EXPECTED_REF\\"',
+        "--component clippy,rustfmt",
+        "createUpdaterArtifacts = false",
+        "zerglang-unsigned-source-stage",
+      ],
     },
     apple_sign: {
       needs: ["build"],
       tokens: ["zerglang-platform-signed"],
+    },
+    signed_smoke: {
+      needs: ["apple_sign"],
+      tokens: [
+        "codesign --verify",
+        "xcrun stapler validate",
+        "spctl --assess",
+        "run --tier=interpreter",
+        "run --tier=jit",
+        "build --emit=object",
+      ],
     },
     sign_updater_preview: {
       needs: ["validate"],
@@ -492,7 +514,8 @@ test("requires every release job, dependency edge, and public operation", () => 
     feed: {
       needs: ["publish"],
       tokens: [
-        "scripts/feed-policy.mjs",
+        "release-data",
+        "policy/scripts/feed-promotion.mjs",
         "zerglang-canonical-release",
         "actions/upload-pages-artifact",
       ],

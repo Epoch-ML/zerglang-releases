@@ -393,14 +393,14 @@ jobs:
           compression-level: 0
 
   apple_sign:
-    name: Sign and notarize on a fresh runner
+    name: Sign and notarize without executing product code
     needs:
       - validate
       - build
     runs-on: macos-15
     timeout-minutes: 90
     environment:
-      name: ${{ needs.validate.outputs.channel }}
+      name: ${{ needs.validate.outputs.channel == 'stable' && 'stable' || 'zerglang-apple-preview' }}
     permissions:
       contents: read
     env:
@@ -584,33 +584,6 @@ jobs:
           rm -f "$RUNNER_TEMP/zerglang-developer-id.p12" \
             "$RUNNER_TEMP"/AuthKey_*.p8 "$original_keychain_path"
 
-      - name: Smoke-test the final Apple-signed application
-        shell: bash
-        run: |
-          set -euo pipefail
-          app="$RUNNER_TEMP/zerglang-apple-input/ZergLang.app"
-          toolchain="$app/Contents/Resources/toolchain"
-          zlc="$toolchain/bin/zlc"
-          example="$RUNNER_TEMP/answer.zl"
-          cat >"$example" <<'ZERGLANG'
-          module answer;
-
-          public value App {
-              public algorithm message main(type: Class<Self>) -> Int32
-              ensures { result == 42; } effects {} {
-                  return 6 * 7;
-              }
-          }
-          ZERGLANG
-          [[ "$("$zlc" run --tier=interpreter "$example")" == "42" ]]
-          [[ "$("$zlc" run --tier=jit "$example")" == "42" ]]
-          object="$RUNNER_TEMP/zerglang-signed-answer.o"
-          program="$RUNNER_TEMP/zerglang-signed-answer"
-          "$zlc" build --emit=object --output="$object" "$example"
-          xcrun clang -arch arm64 -mmacosx-version-min=15.0 \
-            "$object" "$toolchain/aot_launcher.c" -o "$program"
-          [[ "$("$program")" == "42" ]]
-
       - name: Package the signed payload without Apple credentials
         shell: bash
         run: |
@@ -644,11 +617,125 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+  signed_smoke:
+    name: Verify and execute the signed application without credentials
+    needs:
+      - validate
+      - apple_sign
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CHANNEL: ${{ needs.validate.outputs.channel }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: policy
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: policy/package-lock.json
+
+      - name: Test trusted signed-payload policy before extraction
+        working-directory: policy
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: zerglang-platform-signed
+          path: signed
+
+      - name: Verify final Apple signatures and notarization
+        env:
+          OUTPUT_DIRECTORY: ${{ runner.temp }}/zerglang-signed-smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(find signed -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq 4 ]]
+          if find signed -mindepth 1 -maxdepth 1 \! -type f -print -quit | grep -q .; then
+            echo "::error::signed payload contains a non-regular entry"
+            exit 1
+          fi
+          metadata="signed/platform-metadata.json"
+          jq -e --arg channel "$CHANNEL" --arg version "$VERSION" \
+            '.channel == $channel and .version == $version
+             and .platform == "darwin-aarch64"
+             and .apple_signature == (if $channel == "stable" then "developer-id" else "ad-hoc" end)
+             and .apple_notarized == ($channel == "stable")' "$metadata" >/dev/null
+          node --input-type=module <<'NODE'
+          import { extractSourceApplication } from "./policy/scripts/package-macos.mjs";
+          const result = await extractSourceApplication({
+            archivePath: "signed/ZergLang.app.tar.gz",
+            outputDirectory: process.env.OUTPUT_DIRECTORY,
+            maxArchiveBytes: 536_870_912,
+            maxEntryCount: 16_384,
+            maxFileBytes: 536_870_912,
+            maxUncompressedBytes: 2_147_483_648,
+          });
+          if (result.entryCount < 2 || result.uncompressedBytes < 1) {
+            throw new Error("signed application archive is empty");
+          }
+          NODE
+          app="$OUTPUT_DIRECTORY/ZergLang.app"
+          dmg="signed/ZergLang_${VERSION}_aarch64.dmg"
+          [[ -d "$app" && ! -L "$app" && -f "$dmg" && ! -L "$dmg" ]]
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign --verify --strict --verbose=2 "$dmg"
+          hdiutil verify "$dmg" >/dev/null
+          if [[ "$CHANNEL" == "stable" ]]; then
+            xcrun stapler validate "$app"
+            xcrun stapler validate "$dmg"
+            app_assessment="$(spctl --assess --type execute --verbose=4 "$app" 2>&1)"
+            dmg_assessment="$(spctl --assess --type open \
+              --context context:primary-signature --verbose=4 "$dmg" 2>&1)"
+            grep -F 'source=Notarized Developer ID' <<<"$app_assessment"
+            grep -F 'source=Notarized Developer ID' <<<"$dmg_assessment"
+          else
+            codesign -dv --verbose=4 "$app" 2>&1 | grep -F 'Signature=adhoc'
+            codesign -dv --verbose=4 "$dmg" 2>&1 | grep -F 'Signature=adhoc'
+          fi
+
+      - name: Smoke-test packaged interpreter, JIT, and AOT tiers
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/zerglang-signed-smoke/ZergLang.app"
+          toolchain="$app/Contents/Resources/toolchain"
+          zlc="$toolchain/bin/zlc"
+          example="$RUNNER_TEMP/answer.zl"
+          cat >"$example" <<'ZERGLANG'
+          module answer;
+
+          public value App {
+              public algorithm message main(type: Class<Self>) -> Int32
+              ensures { result == 42; } effects {} {
+                  return 6 * 7;
+              }
+          }
+          ZERGLANG
+          [[ "$("$zlc" run --tier=interpreter "$example")" == "42" ]]
+          [[ "$("$zlc" run --tier=jit "$example")" == "42" ]]
+          object="$RUNNER_TEMP/zerglang-signed-answer.o"
+          program="$RUNNER_TEMP/zerglang-signed-answer"
+          "$zlc" build --emit=object --output="$object" "$example"
+          xcrun clang -arch arm64 -mmacosx-version-min=15.0 \
+            "$object" "$toolchain/aot_launcher.c" -o "$program"
+          [[ "$("$program")" == "42" ]]
+
   sign_updater_preview:
     name: Sign the finished updater archive on a fresh runner (preview)
     needs:
       - validate
-      - apple_sign
+      - signed_smoke
     if: needs.validate.outputs.channel == 'preview'
     runs-on: ubuntu-24.04
     environment: preview
@@ -731,7 +818,7 @@ jobs:
     name: Sign the finished updater archive on a fresh runner (stable)
     needs:
       - validate
-      - apple_sign
+      - signed_smoke
     if: needs.validate.outputs.channel == 'stable'
     runs-on: ubuntu-24.04
     environment: zerglang-updater-stable
@@ -1193,17 +1280,14 @@ jobs:
           compression-level: 0
 
   feed:
-    name: Promote only canonical verified bytes to Pages
+    name: Promote canonical bytes on release-data
     needs:
       - validate
       - publish
     runs-on: ubuntu-24.04
+    environment: zerglang-feed
     permissions:
-      contents: write
-      pages: write
-      id-token: write
-    outputs:
-      page_url: ${{ steps.pages.outputs.base_url }}
+      contents: read
     env:
       CHANNEL: ${{ needs.validate.outputs.channel }}
       RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
@@ -1214,18 +1298,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-          path: index
+          path: policy
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "22.23.2"
           cache: npm
-          cache-dependency-path: index/package-lock.json
+          cache-dependency-path: policy/package-lock.json
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: zerglang-canonical-release
           path: canonical
       - name: Revalidate request, tag, immutable release, and canonical controls
-        working-directory: index
+        working-directory: policy
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -1253,38 +1339,79 @@ jobs:
           jq -e --arg version "$VERSION" '.version == $version' \
             ../canonical/latest.json >/dev/null
 
-      - name: Stage monotonic idempotent updater history
-        working-directory: index
+      - name: Clone release-data and prepare strict SSH host keys without credentials
         shell: bash
         run: |
           set -euo pipefail
-          git pull --ff-only origin main
-          node scripts/feed-policy.mjs "$CHANNEL" "$VERSION" ../canonical site
-          expected_latest="site/$CHANNEL/latest.json"
-          expected_history="site/$CHANNEL/releases/$VERSION.json"
-          mapfile -t changed < <(git status --short | sed -E 's/^...//')
-          for path in "${changed[@]}"; do
-            [[ "$path" == "$expected_latest" || "$path" == "$expected_history" ]] || {
-              echo "::error::feed promotion changed unexpected path: $path"
-              exit 1
-            }
-          done
-          cmp ../canonical/latest.json "$expected_latest"
-          cmp ../canonical/release-metadata.json "$expected_history"
-          git add -- "$expected_latest" "$expected_history"
-          if ! git diff --cached --quiet; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git commit -m "Publish $RELEASE_TAG updater manifest"
-            git push origin HEAD:main
-          fi
-          git diff --exit-code
+          git clone --branch release-data --single-branch --no-tags \
+            "https://github.com/${GITHUB_REPOSITORY}.git" data
+          [[ "$(git -C data symbolic-ref --short HEAD)" == "release-data" ]]
+          known_hosts="$RUNNER_TEMP/zerglang-feed-known-hosts"
+          curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            https://api.github.com/meta \
+            | jq -er '.ssh_keys[] | select(startswith("ssh-ed25519 ")) | "github.com " + .' \
+            >"$known_hosts"
+          chmod 600 "$known_hosts"
+          ssh-keygen -F github.com -f "$known_hosts" >/dev/null
 
-      - id: pages
-        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - name: Prepare the monotonic release-data commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          node policy/scripts/feed-promotion.mjs prepare \
+            data canonical "$CHANNEL" "$VERSION" "$RELEASE_TAG" \
+            | tee "$RUNNER_TEMP/zerglang-feed-prepared.json"
+          jq -e --arg channel "$CHANNEL" --arg version "$VERSION" \
+            '.status == "committed" or .status == "unchanged"' \
+            "$RUNNER_TEMP/zerglang-feed-prepared.json" >/dev/null
+          cmp canonical/latest.json "data/site/$CHANNEL/latest.json"
+          cmp canonical/release-metadata.json \
+            "data/site/$CHANNEL/releases/$VERSION.json"
+
+      - name: Push only the prepared release-data commit
+        env:
+          FEED_DEPLOY_KEY: ${{ secrets.ZERGLANG_FEED_DEPLOY_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$FEED_DEPLOY_KEY" ]] || {
+            echo "::error::ZERGLANG_FEED_DEPLOY_KEY is unavailable"
+            exit 1
+          }
+          key_path="$RUNNER_TEMP/zerglang-feed-deploy-key"
+          known_hosts="$RUNNER_TEMP/zerglang-feed-known-hosts"
+          cleanup() {
+            rm -f "$key_path"
+          }
+          trap cleanup EXIT
+          umask 077
+          printf '%s\n' "$FEED_DEPLOY_KEY" >"$key_path"
+          unset FEED_DEPLOY_KEY
+          export GIT_CONFIG_GLOBAL=/dev/null
+          export GIT_CONFIG_NOSYSTEM=1
+          export GIT_SSH_COMMAND="ssh -i $key_path -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts"
+          expected_parent="$(jq -er '.parent | select(test("^[0-9a-f]{40}$"))' \
+            "$RUNNER_TEMP/zerglang-feed-prepared.json")"
+          node policy/scripts/feed-promotion.mjs push \
+            data "git@github.com:${GITHUB_REPOSITORY}.git" release-data \
+            "$expected_parent"
+
+      - name: Validate the deterministic Pages tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          if find data/site \! -type f \! -type d -print -quit | grep -q .; then
+            echo "::error::Pages site contains a symlink or special file"
+            exit 1
+          fi
+          git -C data diff --exit-code
+          git -C data diff --cached --exit-code
+
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
-          path: index/site
+          path: data/site
 
   deploy_pages:
     name: Deploy verified updater site
