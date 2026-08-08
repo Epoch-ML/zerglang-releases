@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
@@ -124,6 +125,29 @@ test("prepares and pushes only a canonical release-data commit without executing
     bundle.main,
   );
   await assert.rejects(readFile(bundle.sentinel), { code: "ENOENT" });
+});
+
+test("preparation disables local Git hooks before creating the data commit", async () => {
+  const bundle = await fixture();
+  await writeCanonical(bundle.canonical, "1.2.4");
+  const hookSentinel = join(bundle.root, "pre-commit-executed");
+  const hook = join(bundle.data, ".git", "hooks", "pre-commit");
+  await writeFile(
+    hook,
+    `#!/bin/sh\nprintf executed > ${JSON.stringify(hookSentinel)}\n`,
+  );
+  await chmod(hook, 0o755);
+
+  const prepared = await prepareFeedPromotion({
+    dataDirectory: bundle.data,
+    releaseDirectory: bundle.canonical,
+    channel: "stable",
+    version: "1.2.4",
+    releaseTag: "zerglang-ide-v1.2.4",
+  });
+
+  assert.equal(prepared.status, "committed");
+  await assert.rejects(readFile(hookSentinel), { code: "ENOENT" });
 });
 
 test("is idempotent and rejects a concurrent release-data advance", async () => {
