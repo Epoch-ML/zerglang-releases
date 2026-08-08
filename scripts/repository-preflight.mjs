@@ -88,6 +88,31 @@ const EXPECTED_RULESETS = Object.freeze([
   }),
 ]);
 
+const EXPECTED_SOURCE_RULESETS = Object.freeze([
+  Object.freeze({
+    name: "ZergLang branch authority",
+    refs: Object.freeze(["refs/heads/zerglang"]),
+    bypass: Object.freeze(["User:1042757"]),
+    rules: Object.freeze(["creation", "update"]),
+  }),
+  Object.freeze({
+    name: "ZergLang branch history",
+    refs: Object.freeze(["refs/heads/zerglang"]),
+    bypass: Object.freeze([]),
+    rules: Object.freeze(["deletion", "non_fast_forward"]),
+  }),
+  Object.freeze({
+    name: "Reviewed ZergLang changes",
+    refs: Object.freeze(["refs/heads/zerglang"]),
+    bypass: Object.freeze(["User:1042757"]),
+    rules: Object.freeze([
+      "pull_request:rebase:1:last-push",
+      "required_linear_history",
+      "required_status_checks:ZergLang release policy:15368:strict",
+    ]),
+  }),
+]);
+
 export class RepositoryPreflightError extends Error {
   constructor(message) {
     super(message);
@@ -228,6 +253,16 @@ export function auditRepositoryState(state, { phase } = {}) {
     if (!rulesetMatches(actual, expected)) {
       errors.push(diagnostic(
         "ruleset-contract",
+        `${expected.name} differs from the cutover contract`,
+      ));
+    }
+  }
+  const sourceRulesets = Array.isArray(source.rulesets) ? source.rulesets : [];
+  for (const expected of EXPECTED_SOURCE_RULESETS) {
+    const actual = sourceRulesets.find((ruleset) => ruleset.name === expected.name);
+    if (!rulesetMatches(actual, expected)) {
+      errors.push(diagnostic(
+        "source-ruleset-contract",
         `${expected.name} differs from the cutover contract`,
       ));
     }
@@ -381,6 +416,10 @@ export async function collectRepositoryState({
     releaseRepository,
     environmentResponse,
   );
+  const repositorySecretsResponse = await request({
+    repository: releaseRepository,
+    path: "actions/secrets",
+  });
   const releaseKeys = await request({
     repository: releaseRepository,
     path: "keys",
@@ -399,6 +438,15 @@ export async function collectRepositoryState({
     path: "actions/workflows",
   });
   const sourceKeys = await request({ repository: sourceRepository, path: "keys" });
+  const sourceRulesetResponse = await request({
+    repository: sourceRepository,
+    path: "rulesets",
+  });
+  const sourceRulesets = await collectRulesets(
+    request,
+    sourceRepository,
+    sourceRulesetResponse,
+  );
 
   return {
     release: {
@@ -408,6 +456,9 @@ export async function collectRepositoryState({
         ? releaseWorkflows.workflows.map(({ path, state }) => ({ path, state }))
         : [],
       environments,
+      repositorySecrets: Array.isArray(repositorySecretsResponse.secrets)
+        ? repositorySecretsResponse.secrets.map((secret) => secret.name).sort()
+        : [],
       deployKeys: Array.isArray(releaseKeys) ? releaseKeys : [],
       rulesets,
     },
@@ -416,6 +467,7 @@ export async function collectRepositoryState({
         ? sourceWorkflows.workflows.map(({ path, state }) => ({ path, state }))
         : [],
       deployKeys: Array.isArray(sourceKeys) ? sourceKeys : [],
+      rulesets: sourceRulesets,
     },
   };
 }
