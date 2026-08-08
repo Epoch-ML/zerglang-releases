@@ -146,6 +146,7 @@ jobs:
     needs: validate
     runs-on: macos-15
     timeout-minutes: 120
+    environment: zerglang-source-read
     permissions:
       contents: read
     env:
@@ -566,24 +567,6 @@ jobs:
           fi
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign --verify --strict --verbose=2 "$dmg"
-          node scripts/package-macos.mjs "$app" "$output/ZergLang.app.tar.gz"
-          cp source-stage/updater.pubkey "$output/updater.pubkey"
-          APPLE_NOTARIZED="$([[ "$CHANNEL" == "stable" ]] && echo true || echo false)" \
-          APPLE_SIGNATURE="$([[ "$CHANNEL" == "stable" ]] && echo developer-id || echo ad-hoc)" \
-          OUTPUT="$output/platform-metadata.json" node --input-type=module <<'NODE'
-          import { writeFile } from "node:fs/promises";
-          await writeFile(process.env.OUTPUT, `${JSON.stringify({
-            schema_version: 2,
-            product: "ZergLang IDE",
-            version: process.env.VERSION,
-            channel: process.env.CHANNEL,
-            release_tag: process.env.RELEASE_TAG,
-            source_sha: process.env.SOURCE_SHA,
-            platform: "darwin-aarch64",
-            apple_signature: process.env.APPLE_SIGNATURE,
-            apple_notarized: process.env.APPLE_NOTARIZED === "true",
-          }, null, 2)}\n`);
-          NODE
 
       - name: Delete ephemeral Apple credentials
         if: always()
@@ -628,6 +611,31 @@ jobs:
             "$object" "$toolchain/aot_launcher.c" -o "$program"
           [[ "$("$program")" == "42" ]]
 
+      - name: Package the signed payload without Apple credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/zerglang-apple-input/ZergLang.app"
+          output="$RUNNER_TEMP/zerglang-platform-signed"
+          node scripts/package-macos.mjs "$app" "$output/ZergLang.app.tar.gz"
+          cp source-stage/updater.pubkey "$output/updater.pubkey"
+          APPLE_NOTARIZED="$([[ "$CHANNEL" == "stable" ]] && echo true || echo false)" \
+          APPLE_SIGNATURE="$([[ "$CHANNEL" == "stable" ]] && echo developer-id || echo ad-hoc)" \
+          OUTPUT="$output/platform-metadata.json" node --input-type=module <<'NODE'
+          import { writeFile } from "node:fs/promises";
+          await writeFile(process.env.OUTPUT, `${JSON.stringify({
+            schema_version: 2,
+            product: "ZergLang IDE",
+            version: process.env.VERSION,
+            channel: process.env.CHANNEL,
+            release_tag: process.env.RELEASE_TAG,
+            source_sha: process.env.SOURCE_SHA,
+            platform: "darwin-aarch64",
+            apple_signature: process.env.APPLE_SIGNATURE,
+            apple_notarized: process.env.APPLE_NOTARIZED === "true",
+          }, null, 2)}\n`);
+          NODE
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: zerglang-platform-signed
@@ -664,7 +672,25 @@ jobs:
         with:
           name: zerglang-platform-signed
           path: release-input
-      - name: Sign and collect the preview payload
+      - name: Prepare the public preview updater verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmp --silent keys/zerglang-preview-updater.pubkey release-input/updater.pubkey
+          verifier_archive="$RUNNER_TEMP/minisign-0.12-linux.tar.gz"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --max-filesize 10485760 \
+            https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz \
+            --output "$verifier_archive"
+          echo '9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  '"$verifier_archive" \
+            | sha256sum -c -
+          tar -xzf "$verifier_archive" -C "$RUNNER_TEMP"
+          PUBLIC_KEY=keys/zerglang-preview-updater.pubkey node - <<'NODE'
+          const fs = require("node:fs");
+          fs.writeFileSync(process.env.RUNNER_TEMP + "/zerglang-updater.pub", Buffer.from(fs.readFileSync(process.env.PUBLIC_KEY, "utf8").trim(), "base64"));
+          NODE
+      - name: Sign only the preview updater archive
         env:
           TAURI_PRIVATE_KEY: ${{ secrets.ZERGLANG_TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_PRIVATE_KEY_PASSWORD: ${{ secrets.ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -678,19 +704,13 @@ jobs:
           cmp --silent keys/zerglang-preview-updater.pubkey release-input/updater.pubkey
           npm exec --offline -- tauri signer sign release-input/ZergLang.app.tar.gz
           [[ -s release-input/ZergLang.app.tar.gz.sig ]]
-          verifier_archive="$RUNNER_TEMP/minisign-0.12-linux.tar.gz"
-          curl --fail --silent --show-error --location \
-            --proto '=https' --proto-redir '=https' --tlsv1.2 \
-            --max-filesize 10485760 \
-            https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz \
-            --output "$verifier_archive"
-          echo '9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  '"$verifier_archive" \
-            | sha256sum -c -
-          tar -xzf "$verifier_archive" -C "$RUNNER_TEMP"
-          PUBLIC_KEY=keys/zerglang-preview-updater.pubkey \
+          unset TAURI_PRIVATE_KEY TAURI_PRIVATE_KEY_PASSWORD
+      - name: Verify and collect the preview payload without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
           SIGNATURE=release-input/ZergLang.app.tar.gz.sig node - <<'NODE'
           const fs = require("node:fs");
-          fs.writeFileSync(process.env.RUNNER_TEMP + "/zerglang-updater.pub", Buffer.from(fs.readFileSync(process.env.PUBLIC_KEY, "utf8").trim(), "base64"));
           fs.writeFileSync(process.env.RUNNER_TEMP + "/zerglang-updater.minisig", Buffer.from(fs.readFileSync(process.env.SIGNATURE, "utf8").trim(), "base64"));
           NODE
           "$RUNNER_TEMP/minisign-linux/x86_64/minisign" \
@@ -735,7 +755,25 @@ jobs:
         with:
           name: zerglang-platform-signed
           path: release-input
-      - name: Sign and collect the stable payload
+      - name: Prepare the public stable updater verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmp --silent keys/zerglang-stable-updater.pubkey release-input/updater.pubkey
+          verifier_archive="$RUNNER_TEMP/minisign-0.12-linux.tar.gz"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --max-filesize 10485760 \
+            https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz \
+            --output "$verifier_archive"
+          echo '9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  '"$verifier_archive" \
+            | sha256sum -c -
+          tar -xzf "$verifier_archive" -C "$RUNNER_TEMP"
+          PUBLIC_KEY=keys/zerglang-stable-updater.pubkey node - <<'NODE'
+          const fs = require("node:fs");
+          fs.writeFileSync(process.env.RUNNER_TEMP + "/zerglang-updater.pub", Buffer.from(fs.readFileSync(process.env.PUBLIC_KEY, "utf8").trim(), "base64"));
+          NODE
+      - name: Sign only the stable updater archive
         env:
           TAURI_PRIVATE_KEY: ${{ secrets.ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_PRIVATE_KEY_PASSWORD: ${{ secrets.ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -749,19 +787,13 @@ jobs:
           cmp --silent keys/zerglang-stable-updater.pubkey release-input/updater.pubkey
           npm exec --offline -- tauri signer sign release-input/ZergLang.app.tar.gz
           [[ -s release-input/ZergLang.app.tar.gz.sig ]]
-          verifier_archive="$RUNNER_TEMP/minisign-0.12-linux.tar.gz"
-          curl --fail --silent --show-error --location \
-            --proto '=https' --proto-redir '=https' --tlsv1.2 \
-            --max-filesize 10485760 \
-            https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz \
-            --output "$verifier_archive"
-          echo '9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73  '"$verifier_archive" \
-            | sha256sum -c -
-          tar -xzf "$verifier_archive" -C "$RUNNER_TEMP"
-          PUBLIC_KEY=keys/zerglang-stable-updater.pubkey \
+          unset TAURI_PRIVATE_KEY TAURI_PRIVATE_KEY_PASSWORD
+      - name: Verify and collect the stable payload without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
           SIGNATURE=release-input/ZergLang.app.tar.gz.sig node - <<'NODE'
           const fs = require("node:fs");
-          fs.writeFileSync(process.env.RUNNER_TEMP + "/zerglang-updater.pub", Buffer.from(fs.readFileSync(process.env.PUBLIC_KEY, "utf8").trim(), "base64"));
           fs.writeFileSync(process.env.RUNNER_TEMP + "/zerglang-updater.minisig", Buffer.from(fs.readFileSync(process.env.SIGNATURE, "utf8").trim(), "base64"));
           NODE
           "$RUNNER_TEMP/minisign-linux/x86_64/minisign" \
