@@ -152,6 +152,8 @@ export async function prepareFeedPromotion({
     "user.name=github-actions[bot]",
     "-c",
     "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+    "-c",
+    "core.hooksPath=/dev/null",
     "commit",
     "-m",
     `Publish ${releaseTag} updater manifest`,
