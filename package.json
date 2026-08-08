@@ -12,7 +12,8 @@
   "dependencies": {
     "@tauri-apps/cli": "2.8.4",
     "semver": "7.7.2",
-    "tar": "7.5.22"
+    "tar": "7.5.22",
+    "yaml": "2.9.0"
   },
   "devDependencies": {
     "@stryker-mutator/core": "9.6.1",
