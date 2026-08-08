@@ -87,6 +87,20 @@ test("audits immutable head workflow bytes and rejects protected policy changes"
     ["protected-policy-change"],
   );
 
+  for (const protectedPath of [
+    ".github/workflows/unreviewed.yml",
+    "keys/zerglang-preview-updater.pubkey",
+    "scripts/feed-promotion.mjs",
+  ]) {
+    const trustRootChange = structuredClone(safe);
+    trustRootChange.changedPaths = [protectedPath];
+    assert.deepEqual(
+      auditAnchoredPullRequestData(trustRootChange).map(({ code }) => code),
+      ["protected-policy-change"],
+      protectedPath,
+    );
+  }
+
   for (const mutate of [
     (input) => { input.headSha = "moving-head"; },
     (input) => { input.changedPaths = Array.from({ length: 257 }, (_, i) => `docs/${i}`); },
