@@ -387,16 +387,65 @@ export function auditWorkflowPolicy(source) {
 }
 
 export function auditPolicyWorkflow(source) {
-  parseWorkflow(source);
-  return [];
+  const workflow = parseWorkflow(source);
+  const triggers = workflow.on === undefined
+    ? {}
+    : requireMapping(workflow.on, "policy workflow triggers");
+  const pullRequest = triggers.pull_request;
+  const jobs = requireMapping(workflow.jobs, "policy workflow jobs");
+  const policy = jobs.policy === undefined
+    ? null
+    : requireMapping(jobs.policy, "policy job");
+  const serialized = policy === null ? "" : JSON.stringify(policy);
+  const requiredTokens = [
+    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+    "npm ci --ignore-scripts --no-audit --no-fund",
+    "npm audit --audit-level=moderate",
+    "npm test",
+    "node scripts/workflow-policy.mjs .github/workflows/release.yml",
+    "node scripts/workflow-policy.mjs .github/workflows/policy.yml --policy-ci",
+    "actionlint_1.7.12_linux_amd64.tar.gz",
+    "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
+    "git diff --check",
+  ];
+  const branchNames = pullRequest !== null && typeof pullRequest === "object" &&
+      !Array.isArray(pullRequest) && Array.isArray(pullRequest.branches)
+    ? [...pullRequest.branches].sort()
+    : [];
+  const permissions = workflow.permissions;
+  const safePermissions = permissions !== null && typeof permissions === "object" &&
+    !Array.isArray(permissions) &&
+    Object.keys(permissions).length === 1 && permissions.contents === "read";
+  const valid = arraysEqual(Object.keys(triggers).sort(), ["pull_request"]) &&
+    arraysEqual(branchNames, ["main"]) &&
+    safePermissions &&
+    policy !== null &&
+    collectSecretNames(workflow).size === 0 &&
+    requiredTokens.every((token) => serialized.includes(token));
+  return valid
+    ? []
+    : [{
+        code: "policy-ci-contract",
+        job: "policy",
+        step: null,
+        message: "pull-request CI must execute every public release policy gate without secrets",
+      }];
 }
 
 async function main() {
-  if (process.argv.length !== 3) {
-    throw new WorkflowPolicyError("usage: workflow-policy.mjs WORKFLOW.yml");
+  if (
+    process.argv.length !== 3 &&
+    !(process.argv.length === 4 && process.argv[3] === "--policy-ci")
+  ) {
+    throw new WorkflowPolicyError(
+      "usage: workflow-policy.mjs WORKFLOW.yml [--policy-ci]",
+    );
   }
   const source = await readFile(process.argv[2], "utf8");
-  const diagnostics = auditWorkflowPolicy(source);
+  const diagnostics = process.argv[3] === "--policy-ci"
+    ? auditPolicyWorkflow(source)
+    : auditWorkflowPolicy(source);
   process.stdout.write(`${JSON.stringify({ diagnostics }, null, 2)}\n`);
   if (diagnostics.length > 0) process.exitCode = 1;
 }

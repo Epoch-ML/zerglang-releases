@@ -100,6 +100,17 @@ test("requires pull-request CI to execute every public policy gate", () => {
     auditPolicyWorkflow(policyWorkflow).map(
       ({ code, job, step }) => `${code}:${job}:${step ?? "job"}`,
     ),
+    [],
+  );
+
+  const incomplete = policyWorkflow.replace(
+    "node scripts/workflow-policy.mjs .github/workflows/release.yml",
+    "true",
+  );
+  assert.deepEqual(
+    auditPolicyWorkflow(incomplete).map(
+      ({ code, job, step }) => `${code}:${job}:${step ?? "job"}`,
+    ),
     ["policy-ci-contract:policy:job"],
   );
 });
