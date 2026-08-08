@@ -15,7 +15,7 @@ const EXPECTED_ENVIRONMENTS = Object.freeze({
       "ZERGLANG_TAURI_SIGNING_PRIVATE_KEY",
       "ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
     ]),
-    branches: Object.freeze(["main"]),
+    refs: Object.freeze(["branch:main"]),
   }),
   stable: Object.freeze({
     secrets: Object.freeze([
@@ -26,30 +26,30 @@ const EXPECTED_ENVIRONMENTS = Object.freeze({
       "ZERGLANG_APPLE_CERTIFICATE_PASSWORD",
       "ZERGLANG_APPLE_SIGNING_IDENTITY",
     ]),
-    branches: Object.freeze(["main"]),
+    refs: Object.freeze(["branch:main"]),
   }),
   "zerglang-apple-preview": Object.freeze({
     secrets: Object.freeze([]),
-    branches: Object.freeze(["main"]),
+    refs: Object.freeze(["branch:main"]),
   }),
   "zerglang-feed": Object.freeze({
     secrets: Object.freeze(["ZERGLANG_FEED_DEPLOY_KEY"]),
-    branches: Object.freeze(["main"]),
+    refs: Object.freeze(["branch:main"]),
   }),
   "zerglang-source-read": Object.freeze({
     secrets: Object.freeze(["ZERG_SOURCE_DEPLOY_KEY"]),
-    branches: Object.freeze(["main"]),
+    refs: Object.freeze(["branch:main"]),
   }),
   "zerglang-updater-stable": Object.freeze({
     secrets: Object.freeze([
       "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY",
       "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
     ]),
-    branches: Object.freeze(["main"]),
+    refs: Object.freeze(["branch:main"]),
   }),
   "github-pages": Object.freeze({
     secrets: Object.freeze([]),
-    branches: Object.freeze(["main"]),
+    refs: Object.freeze(["branch:main"]),
   }),
 });
 
@@ -117,7 +117,10 @@ const EXPECTED_SOURCE_RULESETS = Object.freeze([
 
 const EXPECTED_SOURCE_ENVIRONMENT = Object.freeze({
   secrets: Object.freeze([]),
-  branches: Object.freeze(["zerglang"]),
+  refs: Object.freeze([
+    "tag:zerglang-ide-preview-v*",
+    "tag:zerglang-ide-v*",
+  ]),
 });
 
 export class RepositoryPreflightError extends Error {
@@ -272,11 +275,11 @@ export function auditRepositoryState(state, { phase } = {}) {
     if (
       actual === undefined ||
       !equalStrings(actual.secrets, expected.secrets) ||
-      !equalStrings(actual.branches, expected.branches)
+      !equalStrings(actual.refs, expected.refs)
     ) {
       errors.push(diagnostic(
-        "environment-contract",
-        `${name} environment secrets or branch policy differ`,
+      "environment-contract",
+      `${name} environment secrets or ref policy differ`,
       ));
     }
   }
@@ -317,13 +320,13 @@ export function auditRepositoryState(state, { phase } = {}) {
       EXPECTED_SOURCE_ENVIRONMENT.secrets,
     ) ||
     !equalStrings(
-      sourceRequestEnvironment.branches,
-      EXPECTED_SOURCE_ENVIRONMENT.branches,
+      sourceRequestEnvironment.refs,
+      EXPECTED_SOURCE_ENVIRONMENT.refs,
     )
   ) {
     errors.push(diagnostic(
       "source-environment-contract",
-      "zerglang-release-request must be secret-free and branch-scoped",
+      "zerglang-release-request must be secret-free and tag-scoped",
     ));
   }
   if (
@@ -461,7 +464,7 @@ async function collectEnvironments(request, repository, response) {
       repository,
       path: `environments/${encodeURIComponent(record.name)}/secrets`,
     });
-    const branches = await request({
+    const policies = await request({
       repository,
       path: `environments/${encodeURIComponent(record.name)}/deployment-branch-policies`,
     });
@@ -469,8 +472,10 @@ async function collectEnvironments(request, repository, response) {
       secrets: Array.isArray(secrets.secrets)
         ? secrets.secrets.map((secret) => secret.name).sort()
         : [],
-      branches: Array.isArray(branches.branch_policies)
-        ? branches.branch_policies.map((branch) => branch.name).sort()
+      refs: Array.isArray(policies.branch_policies)
+        ? policies.branch_policies.map((policy) =>
+          `${policy.type}:${policy.name}`
+        ).sort()
         : [],
     };
   }
