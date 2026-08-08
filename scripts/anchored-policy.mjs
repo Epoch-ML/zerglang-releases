@@ -9,16 +9,7 @@ const SHA_PATTERN = /^[0-9a-f]{40}$/;
 const MAX_CHANGED_PATHS = 256;
 const MAX_DIFF_BYTES = 262_144;
 const MAX_WORKFLOW_BYTES = 262_144;
-const PROTECTED_POLICY_PATHS = new Set([
-  ".github/workflows/policy-anchor.yml",
-  ".github/workflows/policy.yml",
-  "package-lock.json",
-  "package.json",
-  "scripts/anchored-policy.mjs",
-  "scripts/anchored-policy.test.mjs",
-  "scripts/workflow-policy.mjs",
-  "scripts/workflow-policy.test.mjs",
-]);
+const CANDIDATE_WORKFLOW_PATH = ".github/workflows/release.yml";
 
 export class AnchoredPolicyError extends Error {
   constructor(message) {
@@ -50,6 +41,15 @@ function validChangedPaths(paths) {
   return new Set(paths).size === paths.length;
 }
 
+function isProtectedPolicyPath(path) {
+  if (path === CANDIDATE_WORKFLOW_PATH) return false;
+  return path === "package.json" ||
+    path === "package-lock.json" ||
+    path.startsWith("scripts/") ||
+    path.startsWith("keys/") ||
+    path.startsWith(".github/");
+}
+
 export function auditAnchoredPullRequestData(input) {
   if (!isPlainObject(input)) {
     throw new AnchoredPolicyError("anchored pull request data must be an object");
@@ -66,7 +66,7 @@ export function auditAnchoredPullRequestData(input) {
       "diff-boundary",
       "the candidate diff path list exceeds its public bounds",
     ));
-  } else if (input.changedPaths.some((path) => PROTECTED_POLICY_PATHS.has(path))) {
+  } else if (input.changedPaths.some(isProtectedPolicyPath)) {
     diagnostics.push(diagnostic(
       "protected-policy-change",
       "protected-base policy code requires a separately audited bootstrap",
