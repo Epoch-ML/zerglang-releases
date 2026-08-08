@@ -406,6 +406,27 @@ test("reports secrets anywhere outside the consuming step env", () => {
   }
 });
 
+test("rejects a secret repeated outside the same consuming step env", () => {
+  for (const exposeOutsideEnv of [
+    (step, expression) => {
+      step.run += `\necho '${expression}'`;
+    },
+    (step, expression) => {
+      step.with = { token: expression };
+    },
+  ]) {
+    const hostile = releaseVariant((workflow) => {
+      const step = workflow.jobs.validate.steps[0];
+      const expression = "${{ secrets.ZERGLANG_APPLE_API_KEY_ID }}";
+      step.env = { APPLE_KEY_ID: expression };
+      exposeOutsideEnv(step, expression);
+    });
+    assert.deepEqual(diagnosticIdentities(hostile), [
+      "secret-outside-step-env:validate:Require protected main",
+    ]);
+  }
+});
+
 test("recognizes compact, padded, nested, and array-contained secret expressions", () => {
   for (const secretExpression of [
     "${{secrets.ZERGLANG_APPLE_API_KEY_ID}}",
@@ -638,6 +659,23 @@ test("reports an unpinned action, mutable publication, and synthetic dispatch", 
   const synthetic = releaseWorkflow.replace("      request_file:", "      channel:");
   assert.deepEqual(diagnosticIdentities(synthetic), [
     "trigger-contract:workflow:job",
+  ]);
+});
+
+test("requires draft creation independently from final undrafting", () => {
+  const hostile = releaseVariant((workflow) => {
+    const step = findStep(
+      workflow,
+      "publish",
+      "Create or resume the exact immutable GitHub Release",
+    );
+    step.run = step.run.replace(
+      '--title "$release_title" --notes "$release_body" --draft',
+      '--title "$release_title" --notes "$release_body"',
+    );
+  });
+  assert.deepEqual(diagnosticIdentities(hostile), [
+    "job-contract:publish:job",
   ]);
 });
 
