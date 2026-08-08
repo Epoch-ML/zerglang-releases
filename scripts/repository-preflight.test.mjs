@@ -56,6 +56,7 @@ function healthyState(workflowState = "disabled_manually") {
         },
       ],
       environments: structuredClone(RELEASE_ENVIRONMENTS),
+      repositorySecrets: [],
       deployKeys: [
         {
           title: "ZergLang release feed writer 2026-08-08",
@@ -114,6 +115,30 @@ function healthyState(workflowState = "disabled_manually") {
           read_only: true,
         },
       ],
+      rulesets: [
+        {
+          name: "ZergLang branch authority",
+          refs: ["refs/heads/zerglang"],
+          bypass: ["User:1042757"],
+          rules: ["creation", "update"],
+        },
+        {
+          name: "ZergLang branch history",
+          refs: ["refs/heads/zerglang"],
+          bypass: [],
+          rules: ["deletion", "non_fast_forward"],
+        },
+        {
+          name: "Reviewed ZergLang changes",
+          refs: ["refs/heads/zerglang"],
+          bypass: ["User:1042757"],
+          rules: [
+            "pull_request:rebase:1:last-push",
+            "required_linear_history",
+            "required_status_checks:ZergLang release policy:15368:strict",
+          ],
+        },
+      ],
     },
   };
 }
@@ -150,8 +175,12 @@ test("fails closed on mutable releases, unsafe Pages, credentials, or missing ru
     read_only: false,
   });
   state.source.deployKeys[0].read_only = false;
+  state.release.repositorySecrets.push("UNSCOPED_RELEASE_KEY");
   state.release.rulesets = state.release.rulesets.filter(
     ({ name }) => name !== "ZergLang feed history",
+  );
+  state.source.rulesets = state.source.rulesets.filter(
+    ({ name }) => name !== "Reviewed ZergLang changes",
   );
 
   assert.deepEqual(
@@ -163,8 +192,10 @@ test("fails closed on mutable releases, unsafe Pages, credentials, or missing ru
       "environment-contract",
       "immutable-releases",
       "pages-contract",
+      "repository-secret",
       "ruleset-contract",
       "source-key",
+      "source-ruleset-contract",
     ],
   );
 });
@@ -182,6 +213,7 @@ test("collects settings through one injected read-only HTTP boundary", async () 
       { workflows: [{ path: ".github/workflows/release.yml", state: "disabled_manually" }] },
     ],
     ["Epoch-ML/zerglang-releases:environments", { environments: [] }],
+    ["Epoch-ML/zerglang-releases:actions/secrets", { secrets: [] }],
     ["Epoch-ML/zerglang-releases:keys", []],
     ["Epoch-ML/zerglang-releases:rulesets", []],
     [
@@ -189,6 +221,7 @@ test("collects settings through one injected read-only HTTP boundary", async () 
       { workflows: [{ path: ".github/workflows/zerglang-ide-release.yml", state: "disabled_manually" }] },
     ],
     ["Epoch-ML/zerg:keys", []],
+    ["Epoch-ML/zerg:rulesets", []],
   ]);
   const request = async ({ repository, path }) => {
     calls.push(`${repository}:${path}`);
@@ -207,6 +240,7 @@ test("collects settings through one injected read-only HTTP boundary", async () 
         },
       ],
       environments: {},
+      repositorySecrets: [],
       deployKeys: [],
       rulesets: [],
     },
@@ -218,6 +252,7 @@ test("collects settings through one injected read-only HTTP boundary", async () 
         },
       ],
       deployKeys: [],
+      rulesets: [],
     },
   });
   assert.deepEqual(calls, [...responses.keys()]);
