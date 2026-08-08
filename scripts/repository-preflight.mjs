@@ -6,6 +6,8 @@ const RELEASE_REPOSITORY = "Epoch-ML/zerglang-releases";
 const SOURCE_REPOSITORY = "Epoch-ML/zerg";
 const RELEASE_WORKFLOW = ".github/workflows/release.yml";
 const SOURCE_WORKFLOW = ".github/workflows/zerglang-ide-release.yml";
+const CANONICAL_PAGES_URL = "https://epoch-ml.github.io/zerglang-releases/";
+const SHA_PATTERN = /^[0-9a-f]{40}$/;
 
 const EXPECTED_ENVIRONMENTS = Object.freeze({
   preview: Object.freeze({
@@ -158,6 +160,49 @@ function rulesetMatches(actual, expected) {
     equalStrings(actual.rules, expected.rules);
 }
 
+function isBoundedFeedBranch(feedBranch) {
+  if (
+    feedBranch === null ||
+    typeof feedBranch !== "object" ||
+    Array.isArray(feedBranch) ||
+    feedBranch.name !== "release-data" ||
+    !SHA_PATTERN.test(feedBranch.sha) ||
+    !SHA_PATTERN.test(feedBranch.tree_sha) ||
+    feedBranch.truncated !== false ||
+    !Array.isArray(feedBranch.entries) ||
+    feedBranch.entries.length < 3 ||
+    feedBranch.entries.length > 4_096
+  ) {
+    return false;
+  }
+  const paths = new Set();
+  for (const entry of feedBranch.entries) {
+    if (
+      entry === null ||
+      typeof entry !== "object" ||
+      Array.isArray(entry) ||
+      typeof entry.path !== "string" ||
+      entry.path.length === 0 ||
+      entry.path.length > 512 ||
+      paths.has(entry.path)
+    ) {
+      return false;
+    }
+    paths.add(entry.path);
+    if (entry.path === "site") {
+      if (entry.type !== "tree" || entry.mode !== "040000") return false;
+      continue;
+    }
+    if (!entry.path.startsWith("site/")) return false;
+    const regularBlob = entry.type === "blob" && entry.mode === "100644";
+    const directory = entry.type === "tree" && entry.mode === "040000";
+    if (!regularBlob && !directory) return false;
+  }
+  return paths.has("site") &&
+    paths.has("site/.nojekyll") &&
+    paths.has("site/index.html");
+}
+
 export function auditRepositoryState(state, { phase } = {}) {
   if (phase !== "cutover" && phase !== "live") {
     throw new RepositoryPreflightError("phase must be cutover or live");
@@ -182,6 +227,21 @@ export function auditRepositoryState(state, { phase } = {}) {
     errors.push(diagnostic(
       "pages-contract",
       "Pages must use a workflow deployment with HTTPS enforced",
+    ));
+  }
+  if (
+    release.pages?.html_url !== CANONICAL_PAGES_URL ||
+    release.pages?.public !== true
+  ) {
+    errors.push(diagnostic(
+      "pages-contract",
+      "Pages must publish the canonical public HTTPS origin",
+    ));
+  }
+  if (!isBoundedFeedBranch(release.feedBranch)) {
+    errors.push(diagnostic(
+      "feed-branch-contract",
+      "release-data must contain only a bounded site tree",
     ));
   }
 
@@ -329,7 +389,12 @@ function normalizeRuleset(ruleset) {
   };
 }
 
-async function defaultRequest({ repository, path, apiVersion = "2022-11-28" }) {
+async function defaultRequest({
+  repository,
+  path,
+  apiVersion = "2022-11-28",
+  allowNotFound = false,
+}) {
   const token = process.env.GH_TOKEN;
   if (typeof token !== "string" || token === "") {
     throw new RepositoryPreflightError("GH_TOKEN is required for repository preflight");
@@ -344,6 +409,7 @@ async function defaultRequest({ repository, path, apiVersion = "2022-11-28" }) {
       },
     },
   );
+  if (allowNotFound && response.status === 404) return null;
   if (!response.ok) {
     throw new RepositoryPreflightError(
       `GitHub API ${repository}/${path} returned ${response.status}`,
@@ -403,6 +469,36 @@ export async function collectRepositoryState({
     apiVersion: "2026-03-10",
   });
   const pages = await request({ repository: releaseRepository, path: "pages" });
+  const feedBranchResponse = await request({
+    repository: releaseRepository,
+    path: "branches/release-data",
+    allowNotFound: true,
+  });
+  let feedBranch = null;
+  if (feedBranchResponse !== null) {
+    const branch = requireObject(feedBranchResponse, "release-data branch");
+    const commit = requireObject(branch.commit, "release-data commit");
+    const commitMetadata = requireObject(
+      commit.commit,
+      "release-data commit metadata",
+    );
+    const tree = requireObject(commitMetadata.tree, "release-data tree reference");
+    const treeResponse = await request({
+      repository: releaseRepository,
+      path: `git/trees/${tree.sha}?recursive=1`,
+    });
+    const treeDocument = requireObject(treeResponse, "release-data tree");
+    feedBranch = {
+      name: branch.name,
+      sha: commit.sha,
+      tree_sha: tree.sha,
+      truncated: treeDocument.truncated,
+      entries: Array.isArray(treeDocument.tree)
+        ? treeDocument.tree.map(({ path, mode, type }) => ({ path, mode, type }))
+          .sort((left, right) => left.path.localeCompare(right.path))
+        : [],
+    };
+  }
   const releaseWorkflows = await request({
     repository: releaseRepository,
     path: "actions/workflows",
@@ -452,6 +548,7 @@ export async function collectRepositoryState({
     release: {
       immutableReleases,
       pages,
+      feedBranch,
       workflows: Array.isArray(releaseWorkflows.workflows)
         ? releaseWorkflows.workflows.map(({ path, state }) => ({ path, state }))
         : [],
