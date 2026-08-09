@@ -229,6 +229,8 @@ function healthyState(workflowState = "disabled_manually") {
             "refs/tags/colony-desktop-v*",
             "refs/tags/zde-preview-v*",
             "refs/tags/zde-v*",
+            "refs/tags/zergchat-preview-v*",
+            "refs/tags/zergchat-v*",
             "refs/tags/zerglang-ide-preview-v*",
             "refs/tags/zerglang-ide-v*",
             "refs/tags/zterm-preview-v*",
@@ -244,6 +246,8 @@ function healthyState(workflowState = "disabled_manually") {
             "refs/tags/colony-desktop-v*",
             "refs/tags/zde-preview-v*",
             "refs/tags/zde-v*",
+            "refs/tags/zergchat-preview-v*",
+            "refs/tags/zergchat-v*",
             "refs/tags/zerglang-ide-preview-v*",
             "refs/tags/zerglang-ide-v*",
             "refs/tags/zterm-preview-v*",
@@ -558,12 +562,14 @@ test("accepts the intentionally shared ZergChat desktop tag patterns", () => {
     "Desktop release tag authority",
     "Desktop release tag immutability",
   ]) {
-    state.source.rulesets.find(
+    const ruleset = state.source.rulesets.find(
       (ruleset) => ruleset.name === name,
-    ).refs.push(
+    );
+    ruleset.refs = [...new Set([
+      ...ruleset.refs,
       "refs/tags/zergchat-preview-v*",
       "refs/tags/zergchat-v*",
-    );
+    ])];
   }
 
   const result = auditRepositoryState(state, { phase: "cutover" });
