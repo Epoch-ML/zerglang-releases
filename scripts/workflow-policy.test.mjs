@@ -746,6 +746,7 @@ test("does not mistake prose, quoted strings, or longer identifiers for contexts
     "secrets.DEPLOY_KEY prose-${{ 'safe' }}",
     "${{ 'safe' }} plain secrets.DEPLOY_KEY }}",
     "${{ 'unterminated safe literal",
+    "${{ secrets.DEPLOY_KEY }",
     "https://example.test/secrets.DEPLOY_KEY",
   ]) {
     const equivalent = releaseVariant((workflow) => {
@@ -763,6 +764,7 @@ test("finds secret contexts across quoted and adjacent expressions", () => {
     "${{ true && secrets.ZERGLANG_APPLE_API_KEY_ID }}",
     "${{ secrets.ZERGLANG_APPLE_API_KEY_ID || true }}",
     "${{secrets}}",
+    "${{ 'quoted''' || secrets.ZERGLANG_APPLE_API_KEY_ID }}",
   ]) {
     const hostile = releaseVariant((workflow) => {
       workflow.jobs.validate.steps[0].env = { LEAK: expression };
