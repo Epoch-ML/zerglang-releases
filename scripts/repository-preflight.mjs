@@ -609,8 +609,9 @@ export async function requestGitHub({
   if (typeof fetchImpl !== "function") {
     throw new RepositoryPreflightError("fetchImpl must be a function");
   }
+  const resource = path === "" ? repository : `${repository}/${path}`;
   const response = await fetchImpl(
-    `https://api.github.com/repos/${repository}/${path}`,
+    `https://api.github.com/repos/${resource}`,
     {
       headers: {
         Accept: "application/vnd.github+json",
@@ -622,7 +623,7 @@ export async function requestGitHub({
   if (allowNotFound && response.status === 404) return null;
   if (!response.ok) {
     throw new RepositoryPreflightError(
-      `GitHub API ${repository}/${path} returned ${response.status}`,
+      `GitHub API ${resource} returned ${response.status}`,
     );
   }
   return response.json();
