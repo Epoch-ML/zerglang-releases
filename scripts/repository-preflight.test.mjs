@@ -552,6 +552,27 @@ test("requires exact source and release tag authority and immutability rules", (
   }
 });
 
+test("accepts the intentionally shared ZergChat desktop tag patterns", () => {
+  const state = healthyState();
+  for (const name of [
+    "Desktop release tag authority",
+    "Desktop release tag immutability",
+  ]) {
+    state.source.rulesets.find(
+      (ruleset) => ruleset.name === name,
+    ).refs.push(
+      "refs/tags/zergchat-preview-v*",
+      "refs/tags/zergchat-v*",
+    );
+  }
+
+  const result = auditRepositoryState(state, { phase: "cutover" });
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.warnings.map(({ code }) => code), [
+    "human-review-limitation",
+  ]);
+});
+
 test("enforces every bounded release-data branch invariant", () => {
   const mutations = [
     (branch) => { branch.name = "main"; },
