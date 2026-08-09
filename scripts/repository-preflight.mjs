@@ -9,6 +9,24 @@ const RELEASE_POLICY_ANCHOR = ".github/workflows/policy-anchor.yml";
 const SOURCE_WORKFLOW = ".github/workflows/zerglang-ide-release.yml";
 const SOURCE_POLICY_ANCHOR =
   ".github/workflows/zerglang-release-policy-anchor.yml";
+const SOURCE_DEFAULT_BRANCH = "development";
+const SOURCE_ANCHOR_DEPENDENCY_PATHS = Object.freeze([
+  SOURCE_WORKFLOW,
+  SOURCE_POLICY_ANCHOR,
+  "zerglang/ide/package-lock.json",
+  "zerglang/ide/package.json",
+  "zerglang/ide/scripts/release/anchoredSourcePolicy.mjs",
+  "zerglang/ide/scripts/release/sourceWorkflowPolicy.mjs",
+]);
+const EXPECTED_SOURCE_DEFAULT_BRANCH_PROTECTION = Object.freeze({
+  enforceAdmins: true,
+  requireLastPushApproval: true,
+  requireLinearHistory: true,
+  strictStatusChecks: true,
+  requiredStatusChecks: Object.freeze([
+    "Protected-base ZergLang release policy:15368",
+  ]),
+});
 const CANONICAL_PAGES_URL = "https://epoch-ml.github.io/zerglang-releases/";
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
 
@@ -135,19 +153,19 @@ const EXPECTED_RULESETS = Object.freeze([
 const EXPECTED_SOURCE_RULESETS = Object.freeze([
   Object.freeze({
     name: "ZergLang branch authority",
-    refs: Object.freeze(["refs/heads/zerglang"]),
+    refs: Object.freeze(["refs/heads/development"]),
     bypass: Object.freeze(["User:1042757"]),
     rules: Object.freeze(["creation", "update"]),
   }),
   Object.freeze({
     name: "ZergLang branch history",
-    refs: Object.freeze(["refs/heads/zerglang"]),
+    refs: Object.freeze(["refs/heads/development"]),
     bypass: Object.freeze([]),
     rules: Object.freeze(["deletion", "non_fast_forward"]),
   }),
   Object.freeze({
     name: "Reviewed ZergLang changes",
-    refs: Object.freeze(["refs/heads/zerglang"]),
+    refs: Object.freeze(["refs/heads/development"]),
     bypass: Object.freeze(["User:1042757"]),
     rules: Object.freeze([
       "pull_request:rebase:1:last-push",
@@ -256,6 +274,47 @@ function environmentMatches(actual, expected) {
     actual.wait_timer === expected.wait_timer;
 }
 
+function sourceAnchorDependenciesMatch(dependencies) {
+  if (!Array.isArray(dependencies) ||
+      dependencies.length !== SOURCE_ANCHOR_DEPENDENCY_PATHS.length) {
+    return false;
+  }
+  const records = new Map();
+  for (const dependency of dependencies) {
+    if (
+      dependency === null ||
+      typeof dependency !== "object" ||
+      Array.isArray(dependency) ||
+      typeof dependency.path !== "string" ||
+      records.has(dependency.path) ||
+      dependency.type !== "file" ||
+      !SHA_PATTERN.test(dependency.sha)
+    ) {
+      return false;
+    }
+    records.set(dependency.path, dependency);
+  }
+  return SOURCE_ANCHOR_DEPENDENCY_PATHS.every((path) => records.has(path));
+}
+
+function sourceDefaultBranchProtectionMatches(protection) {
+  return protection !== null &&
+    typeof protection === "object" &&
+    !Array.isArray(protection) &&
+    protection.enforceAdmins ===
+      EXPECTED_SOURCE_DEFAULT_BRANCH_PROTECTION.enforceAdmins &&
+    protection.requireLastPushApproval ===
+      EXPECTED_SOURCE_DEFAULT_BRANCH_PROTECTION.requireLastPushApproval &&
+    protection.requireLinearHistory ===
+      EXPECTED_SOURCE_DEFAULT_BRANCH_PROTECTION.requireLinearHistory &&
+    protection.strictStatusChecks ===
+      EXPECTED_SOURCE_DEFAULT_BRANCH_PROTECTION.strictStatusChecks &&
+    equalStrings(
+      protection.requiredStatusChecks,
+      EXPECTED_SOURCE_DEFAULT_BRANCH_PROTECTION.requiredStatusChecks,
+    );
+}
+
 function isBoundedFeedBranch(feedBranch) {
   if (
     feedBranch === null ||
@@ -309,6 +368,25 @@ export function auditRepositoryState(state, { phase } = {}) {
   const errors = [];
   const warnings = [];
   const expectedWorkflowState = phase === "cutover" ? "disabled_manually" : "active";
+
+  if (source.defaultBranch !== SOURCE_DEFAULT_BRANCH) {
+    errors.push(diagnostic(
+      "source-default-branch-contract",
+      "the protected source default branch must be development",
+    ));
+  }
+  if (!sourceAnchorDependenciesMatch(source.anchorDependencies)) {
+    errors.push(diagnostic(
+      "source-anchor-dependencies",
+      "source anchor dependency bytes must be the exact protected file roots",
+    ));
+  }
+  if (!sourceDefaultBranchProtectionMatches(source.defaultBranchProtection)) {
+    errors.push(diagnostic(
+      "source-default-branch-protection",
+      "development must enforce admins, last-push approval, linear history, and the strict protected-base check",
+    ));
+  }
 
   if (release.immutableReleases?.enabled !== true) {
     errors.push(diagnostic(
@@ -698,6 +776,46 @@ export async function collectRepositoryState({
     releaseRepository,
     rulesetResponse,
   );
+  const sourceMetadata = requireObject(
+    await request({ repository: sourceRepository, path: "" }),
+    "source repository metadata",
+  );
+  const sourceDefaultBranch = sourceMetadata.default_branch;
+  const sourceAnchorDependencies = [];
+  for (const path of SOURCE_ANCHOR_DEPENDENCY_PATHS) {
+    const dependency = requireObject(
+      await request({
+        repository: sourceRepository,
+        path: `contents/${path}?ref=${encodeURIComponent(SOURCE_DEFAULT_BRANCH)}`,
+      }),
+      `source anchor dependency ${path}`,
+    );
+    sourceAnchorDependencies.push({
+      path: dependency.path,
+      sha: dependency.sha,
+      type: dependency.type,
+    });
+  }
+  const protection = requireObject(
+    await request({
+      repository: sourceRepository,
+      path: `branches/${SOURCE_DEFAULT_BRANCH}/protection`,
+    }),
+    "source default branch protection",
+  );
+  const protectionChecks = Array.isArray(protection.required_status_checks?.checks)
+    ? protection.required_status_checks.checks
+    : [];
+  const sourceDefaultBranchProtection = {
+    enforceAdmins: protection.enforce_admins?.enabled === true,
+    requireLastPushApproval:
+      protection.required_pull_request_reviews?.require_last_push_approval === true,
+    requireLinearHistory: protection.required_linear_history?.enabled === true,
+    strictStatusChecks: protection.required_status_checks?.strict === true,
+    requiredStatusChecks: protectionChecks.map((check) =>
+      `${check.context}:${check.app_id ?? "any"}`
+    ).sort(),
+  };
   const sourceWorkflows = await request({
     repository: sourceRepository,
     path: "actions/workflows",
@@ -742,6 +860,9 @@ export async function collectRepositoryState({
       rulesets,
     },
     source: {
+      defaultBranch: sourceDefaultBranch,
+      anchorDependencies: sourceAnchorDependencies,
+      defaultBranchProtection: sourceDefaultBranchProtection,
       workflows: Array.isArray(sourceWorkflows.workflows)
         ? sourceWorkflows.workflows.map(({ path, state }) => ({ path, state }))
         : [],

@@ -86,7 +86,15 @@ export function auditAnchoredPullRequestData(input) {
     ));
   } else {
     try {
-      const workflowDiagnostics = auditWorkflowPolicy(input.candidateWorkflow);
+      const workflowDiagnostics =
+        typeof input.canonicalWorkflow === "string" &&
+        Buffer.byteLength(input.canonicalWorkflow) >= 1 &&
+        Buffer.byteLength(input.canonicalWorkflow) <= MAX_WORKFLOW_BYTES
+          ? auditWorkflowPolicy(
+              input.candidateWorkflow,
+              input.canonicalWorkflow,
+            )
+          : [{ code: "canonical-workflow-boundary" }];
       if (workflowDiagnostics.length > 0) {
         diagnostics.push(diagnostic(
           "candidate-workflow",
@@ -112,13 +120,13 @@ async function readBounded(path, maximum, description) {
 }
 
 async function main() {
-  if (process.argv.length !== 8) {
+  if (process.argv.length !== 9) {
     throw new AnchoredPolicyError(
-      "usage: anchored-policy.mjs BASE_SHA HEAD_SHA DIFF_Z MODE SIZE CANDIDATE.yml",
+      "usage: anchored-policy.mjs BASE_SHA HEAD_SHA DIFF_Z MODE SIZE CANDIDATE.yml CANONICAL.yml",
     );
   }
   const [, , baseSha, headSha, diffPath, candidateMode, candidateSizeText,
-    candidatePath] = process.argv;
+    candidatePath, canonicalPath] = process.argv;
   const diff = await readBounded(diffPath, MAX_DIFF_BYTES, "candidate diff");
   if (diff.length > 0 && diff[diff.length - 1] !== 0) {
     throw new AnchoredPolicyError("candidate diff must be NUL terminated");
@@ -131,6 +139,11 @@ async function main() {
     MAX_WORKFLOW_BYTES,
     "candidate workflow",
   );
+  const canonical = await readBounded(
+    canonicalPath,
+    MAX_WORKFLOW_BYTES,
+    "canonical workflow",
+  );
   const diagnostics = auditAnchoredPullRequestData({
     baseSha,
     headSha,
@@ -138,6 +151,7 @@ async function main() {
     candidateMode,
     candidateSize: Number(candidateSizeText),
     candidateWorkflow: candidate.toString("utf8"),
+    canonicalWorkflow: canonical.toString("utf8"),
   });
   process.stdout.write(`${JSON.stringify({ diagnostics }, null, 2)}\n`);
   if (diagnostics.length > 0) process.exitCode = 1;

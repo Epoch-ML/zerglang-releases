@@ -67,6 +67,12 @@ function diagnosticIdentities(source) {
   );
 }
 
+function canonicalDiagnosticIdentities(source) {
+  return auditWorkflowPolicy(source, releaseWorkflow).map(
+    ({ code, job, step }) => `${code}:${job}:${step ?? "job"}`,
+  );
+}
+
 function policyDiagnosticIdentities(source) {
   return auditPolicyWorkflow(source).map(
     ({ code, job, step }) => `${code}:${job}:${step ?? "job"}`,
@@ -187,6 +193,58 @@ test("fails closed when release workflow containers have invalid YAML types", ()
 
 test("accepts the release workflow's isolated credential boundaries", () => {
   assert.deepEqual(diagnosticIdentities(releaseWorkflow), []);
+});
+
+test("binds run programs and every workflow context to canonical base bytes", () => {
+  assert.deepEqual(canonicalDiagnosticIdentities(releaseWorkflow), []);
+
+  const addedProgram = releaseVariant((workflow) => {
+    workflow.jobs.validate.steps.push({ name: "Injected", run: "echo injected" });
+  });
+  assert.deepEqual(canonicalDiagnosticIdentities(addedProgram), [
+    "run-program-boundary:workflow:job",
+  ]);
+
+  const modifiedProgram = releaseVariant((workflow) => {
+    findStep(
+      workflow,
+      "apple_sign",
+      "Apply preview ad-hoc or fail-closed stable Apple signing",
+    ).run += "\necho injected";
+  });
+  assert.deepEqual(canonicalDiagnosticIdentities(modifiedProgram), [
+    "run-program-boundary:workflow:job",
+  ]);
+
+  for (const [jobName, stepName] of [
+    ["build", "Fetch exact source objects with one read key"],
+    ["apple_sign", "Apply preview ad-hoc or fail-closed stable Apple signing"],
+    ["sign_updater_preview", "Sign only the preview updater archive"],
+    ["feed", "Push only the prepared release-data commit"],
+  ]) {
+    const tokenContext = releaseVariant((workflow) => {
+      findStep(workflow, jobName, stepName).env.GITHUB_TOKEN =
+        "${{ github.token }}";
+    });
+    assert.deepEqual(canonicalDiagnosticIdentities(tokenContext), [
+      "token-context-boundary:workflow:job",
+    ], `${jobName}/${stepName}`);
+  }
+
+  const relocatedToken = releaseVariant((workflow) => {
+    const publishTokenStep = workflow.jobs.publish.steps.find(
+      (step) => step.env?.GH_TOKEN === "${{ github.token }}",
+    );
+    delete publishTokenStep.env.GH_TOKEN;
+    findStep(
+      workflow,
+      "apple_sign",
+      "Apply preview ad-hoc or fail-closed stable Apple signing",
+    ).env.GH_TOKEN = "${{ github.token }}";
+  });
+  assert.deepEqual(canonicalDiagnosticIdentities(relocatedToken), [
+    "token-context-boundary:workflow:job",
+  ]);
 });
 
 test("accepts a release-data feed and a fresh credential-free signed smoke job", () => {

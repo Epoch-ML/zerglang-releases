@@ -108,6 +108,38 @@ function collectSecretReferencesOutsideStepEnv(step) {
   return references;
 }
 
+function collectTokenContexts(value, path = [], contexts = []) {
+  if (typeof value === "string") {
+    if (value.includes("${{")) {
+      contexts.push({ path: path.join("/"), value });
+    }
+  } else if (Array.isArray(value)) {
+    value.forEach((item, index) =>
+      collectTokenContexts(item, [...path, String(index)], contexts));
+  } else if (value !== null && typeof value === "object") {
+    for (const [key, item] of Object.entries(value)) {
+      collectTokenContexts(item, [...path, key], contexts);
+    }
+  }
+  return contexts;
+}
+
+function collectRunPrograms(workflow) {
+  const jobs = requireMapping(workflow.jobs, "workflow jobs");
+  const programs = [];
+  for (const [jobName, rawJob] of Object.entries(jobs)) {
+    const job = requireMapping(rawJob, `${jobName} job`);
+    if (!Array.isArray(job.steps)) continue;
+    job.steps.forEach((rawStep, index) => {
+      const step = requireMapping(rawStep, `${jobName} step ${index + 1}`);
+      if (typeof step.run === "string") {
+        programs.push({ job: jobName, index, run: step.run });
+      }
+    });
+  }
+  return programs;
+}
+
 function jobContainsContractToken(serializedJob, token) {
   if (token !== "--draft") return serializedJob.includes(token);
   return /(?:^|[^A-Za-z0-9_-])--draft(?=$|[^A-Za-z0-9_=-])/.test(serializedJob);
@@ -567,11 +599,39 @@ function executesPulledFeedPolicy(step, run) {
     workingDirectory === "data";
 }
 
-export function auditWorkflowPolicy(source) {
+export function auditWorkflowPolicy(source, canonicalSource = undefined) {
   const workflow = parseWorkflow(source);
   const jobs = requireMapping(workflow.jobs, "workflow jobs");
   const diagnostics = [];
   const credentialOccurrences = [];
+
+  if (canonicalSource !== undefined) {
+    const canonicalWorkflow = parseWorkflow(canonicalSource);
+    if (
+      JSON.stringify(collectRunPrograms(workflow)) !==
+      JSON.stringify(collectRunPrograms(canonicalWorkflow))
+    ) {
+      addDiagnostic(
+        diagnostics,
+        "run-program-boundary",
+        "workflow",
+        null,
+        "run step order and program bytes must match the protected canonical workflow",
+      );
+    }
+    if (
+      JSON.stringify(collectTokenContexts(workflow)) !==
+      JSON.stringify(collectTokenContexts(canonicalWorkflow))
+    ) {
+      addDiagnostic(
+        diagnostics,
+        "token-context-boundary",
+        "workflow",
+        null,
+        "credential-yielding expressions must match the protected canonical workflow",
+      );
+    }
+  }
 
   const triggers = workflow.on === undefined
     ? {}

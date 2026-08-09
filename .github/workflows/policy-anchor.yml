@@ -89,7 +89,7 @@ jobs:
           candidate_path="$RUNNER_TEMP/candidate-release.yml"
           set +o pipefail
           git -C "$repository" -c core.hooksPath=/dev/null \
-            diff --name-only -z "$BASE_SHA...$HEAD_SHA" \
+            diff --name-only --no-renames -z "$BASE_SHA...$HEAD_SHA" \
             | head -c 262145 >"$diff_path"
           pipeline_status=("${PIPESTATUS[@]}")
           set -o pipefail
@@ -106,4 +106,5 @@ jobs:
           git -C "$repository" cat-file blob "$candidate_object" >"$candidate_path"
           node trusted-policy/scripts/anchored-policy.mjs \
             "$BASE_SHA" "$HEAD_SHA" "$diff_path" "$candidate_mode" \
-            "$candidate_size" "$candidate_path"
+            "$candidate_size" "$candidate_path" \
+            trusted-policy/.github/workflows/release.yml
