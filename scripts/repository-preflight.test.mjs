@@ -217,6 +217,7 @@ function healthyState(workflowState = "disabled_manually") {
         strictStatusChecks: true,
         requiredStatusChecks: [
           "Protected-base ZergLang release policy:15368",
+          "Protected-base ZergChat release policy:15368",
         ],
       },
       workflows: [
@@ -441,6 +442,33 @@ test("binds the source anchor bytes and protections to default development", () 
       "required_status_checks:Protected-base ZergChat release policy:15368:strict",
     ],
   });
+});
+
+test("legacy development protection requires both shared strict contexts", () => {
+  const accepted = healthyState();
+  assert.deepEqual(errorCodes(accepted), []);
+
+  const expectedContexts = [
+    "Protected-base ZergLang release policy:15368",
+    "Protected-base ZergChat release policy:15368",
+  ];
+  assert.deepEqual(
+    accepted.source.defaultBranchProtection.requiredStatusChecks,
+    expectedContexts,
+  );
+
+  for (const removed of expectedContexts) {
+    const state = healthyState();
+    state.source.defaultBranchProtection.requiredStatusChecks =
+      state.source.defaultBranchProtection.requiredStatusChecks.filter(
+        (context) => context !== removed,
+      );
+    assert.deepEqual(
+      errorCodes(state),
+      ["source-default-branch-protection"],
+      removed,
+    );
+  }
 });
 
 test("requires active workflows only in live mode", () => {
@@ -1059,10 +1087,16 @@ test("collects settings through one injected read-only HTTP boundary", async () 
         },
         required_status_checks: {
           strict: true,
-          checks: [{
-            context: "Protected-base ZergLang release policy",
-            app_id: 15368,
-          }],
+          checks: [
+            {
+              context: "Protected-base ZergLang release policy",
+              app_id: 15368,
+            },
+            {
+              context: "Protected-base ZergChat release policy",
+              app_id: 15368,
+            },
+          ],
         },
       },
     ],
@@ -1166,6 +1200,7 @@ test("collects settings through one injected read-only HTTP boundary", async () 
         requireLinearHistory: true,
         strictStatusChecks: true,
         requiredStatusChecks: [
+          "Protected-base ZergChat release policy:15368",
           "Protected-base ZergLang release policy:15368",
         ],
       },
