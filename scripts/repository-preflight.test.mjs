@@ -80,6 +80,32 @@ const SOURCE_ANCHOR_DEPENDENCIES = [
   type: "file",
 }));
 
+const SHARED_SOURCE_BRANCH_RULESETS = [
+  {
+    name: "Development branch authority",
+    refs: ["refs/heads/development"],
+    bypass: ["User:1042757"],
+    rules: ["creation", "update"],
+  },
+  {
+    name: "Development branch history",
+    refs: ["refs/heads/development"],
+    bypass: [],
+    rules: ["deletion", "non_fast_forward"],
+  },
+  {
+    name: "Reviewed development changes",
+    refs: ["refs/heads/development"],
+    bypass: ["User:1042757"],
+    rules: [
+      "pull_request:rebase:1:last-push",
+      "required_linear_history",
+      "required_status_checks:Protected-base ZergLang release policy:15368:strict",
+      "required_status_checks:Protected-base ZergChat release policy:15368:strict",
+    ],
+  },
+];
+
 function healthyState(workflowState = "disabled_manually") {
   return {
     release: {
@@ -294,6 +320,62 @@ test("accepts the exact disabled cutover topology and reports only human-review 
   assert.deepEqual(result.errors, []);
   assert.deepEqual(result.warnings.map(({ code }) => code), [
     "human-review-limitation",
+  ]);
+});
+
+test("accepts the shared product-neutral development ruleset topology", () => {
+  const state = healthyState();
+  state.source.rulesets = [
+    ...structuredClone(SHARED_SOURCE_BRANCH_RULESETS),
+    ...state.source.rulesets.slice(3),
+  ];
+
+  const result = auditRepositoryState(state, { phase: "cutover" });
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.warnings.map(({ code }) => code), [
+    "human-review-limitation",
+  ]);
+});
+
+test("requires exactly one matching verified read-only source checkout key", () => {
+  const duplicate = healthyState();
+  duplicate.source.deployKeys.push(
+    structuredClone(duplicate.source.deployKeys[0]),
+  );
+  assert.deepEqual(errorCodes(duplicate), ["source-key"]);
+
+  const unrelated = healthyState();
+  unrelated.source.deployKeys.push({
+    title: "Unrelated read-only integration",
+    verified: true,
+    read_only: true,
+  });
+  assert.deepEqual(errorCodes(unrelated), []);
+});
+
+test("rejects extra and duplicate release or source rulesets", () => {
+  const outcomes = [];
+  for (const owner of ["release", "source"]) {
+    const extra = healthyState();
+    extra[owner].rulesets.push({
+      name: "Unreviewed policy",
+      refs: ["~ALL"],
+      bypass: ["User:1042757"],
+      rules: ["update"],
+    });
+    outcomes.push({ owner, variant: "extra", codes: errorCodes(extra) });
+
+    const duplicate = healthyState();
+    duplicate[owner].rulesets.push(
+      structuredClone(duplicate[owner].rulesets[0]),
+    );
+    outcomes.push({ owner, variant: "duplicate", codes: errorCodes(duplicate) });
+  }
+  assert.deepEqual(outcomes, [
+    { owner: "release", variant: "extra", codes: ["ruleset-contract"] },
+    { owner: "release", variant: "duplicate", codes: ["ruleset-contract"] },
+    { owner: "source", variant: "extra", codes: ["source-ruleset-contract"] },
+    { owner: "source", variant: "duplicate", codes: ["source-ruleset-contract"] },
   ]);
 });
 
