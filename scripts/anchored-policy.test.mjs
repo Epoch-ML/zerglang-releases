@@ -219,6 +219,15 @@ test("enforces every changed-path boundary without rejecting ordinary product pa
     assert.deepEqual(codes(input), ["diff-boundary"]);
   }
 
+  const invalidPath = safeInput();
+  invalidPath.changedPaths = ["docs/../policy"];
+  assert.deepEqual(auditAnchoredPullRequestData(invalidPath), [
+    {
+      code: "diff-boundary",
+      message: "the candidate diff path list exceeds its public bounds",
+    },
+  ]);
+
   for (const productPath of [
     "docs/scripts/example.md",
     "scripted/tool.mjs",
@@ -268,6 +277,16 @@ test("enforces regular candidate blob type, size, bytes, and policy diagnostics"
     mutate(input);
     assert.deepEqual(codes(input), ["candidate-blob-boundary"]);
   }
+
+  const empty = safeInput();
+  empty.candidateWorkflow = "";
+  empty.candidateSize = 0;
+  assert.deepEqual(auditAnchoredPullRequestData(empty), [
+    {
+      code: "candidate-blob-boundary",
+      message: "candidate release workflow must be one bounded regular Git blob",
+    },
+  ]);
 
   const oneByteWorkflow = safeInput();
   oneByteWorkflow.candidateWorkflow = "x";
