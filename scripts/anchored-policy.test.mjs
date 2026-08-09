@@ -8,7 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { parse } from "yaml";
+import { parse, stringify } from "yaml";
 
 import {
   AnchoredPolicyError,
@@ -32,6 +32,7 @@ function safeInput() {
     candidateMode: "100644",
     candidateSize: Buffer.byteLength(releaseWorkflow),
     candidateWorkflow: releaseWorkflow,
+    canonicalWorkflow: releaseWorkflow,
   };
 }
 
@@ -96,6 +97,7 @@ test("uses a base-anchored pull_request_target workflow without head execution",
     "core.hooksPath=/dev/null",
     "npm ci --ignore-scripts --no-audit --no-fund",
     "trusted-policy/scripts/anchored-policy.mjs",
+    "diff --name-only --no-renames -z",
   ]) {
     assert.equal(serialized.includes(token), true, token);
   }
@@ -108,6 +110,37 @@ test("uses a base-anchored pull_request_target workflow without head execution",
   ]) {
     assert.equal(serialized.includes(forbidden), false, forbidden);
   }
+});
+
+test("materializes both sides of a real protected-path rename", async (t) => {
+  const repository = await mkdtemp(join(tmpdir(), "zerglang-public-anchor-rename-"));
+  t.after(() => rm(repository, { recursive: true, force: true }));
+  await execFileAsync("git", ["init", "--quiet", repository]);
+  await execFileAsync("git", ["-C", repository, "config", "user.name", "Policy Test"]);
+  await execFileAsync("git", ["-C", repository, "config", "user.email", "policy@example.invalid"]);
+  await mkdir(join(repository, "scripts"));
+  await mkdir(join(repository, "src"));
+  await writeFile(join(repository, "scripts/protected.mjs"), "export default true;\n");
+  await execFileAsync("git", ["-C", repository, "add", "."]);
+  await execFileAsync("git", ["-C", repository, "commit", "--quiet", "-m", "base"]);
+  const { stdout: base } = await execFileAsync(
+    "git", ["-C", repository, "rev-parse", "HEAD"],
+  );
+  await execFileAsync("git", [
+    "-C", repository, "mv", "scripts/protected.mjs", "src/product.mjs",
+  ]);
+  await execFileAsync("git", ["-C", repository, "commit", "--quiet", "-m", "rename"]);
+  const { stdout: head } = await execFileAsync(
+    "git", ["-C", repository, "rev-parse", "HEAD"],
+  );
+  const { stdout } = await execFileAsync("git", [
+    "-C", repository, "diff", "--name-only", "--no-renames", "-z",
+    `${base.trim()}...${head.trim()}`,
+  ], { encoding: "buffer" });
+  assert.deepEqual(stdout.toString("utf8").split("\0").filter(Boolean), [
+    "scripts/protected.mjs",
+    "src/product.mjs",
+  ]);
 });
 
 test("audits immutable head workflow bytes and rejects protected policy changes", async () => {
@@ -159,6 +192,73 @@ test("audits immutable head workflow bytes and rejects protected policy changes"
     ),
     true,
   );
+});
+
+test("binds every run program and token context to protected canonical bytes", () => {
+  const addedProgram = safeInput();
+  const addedWorkflow = parse(releaseWorkflow);
+  addedWorkflow.jobs.validate.steps.push({
+    name: "Unreviewed program",
+    run: "echo injected",
+  });
+  addedProgram.candidateWorkflow = stringify(addedWorkflow);
+  addedProgram.candidateSize = Buffer.byteLength(addedProgram.candidateWorkflow);
+  assert.deepEqual(codes(addedProgram), ["candidate-workflow"]);
+
+  const windows = [
+    ["build", "Fetch exact source objects with one read key"],
+    ["apple_sign", "Apply preview ad-hoc or fail-closed stable Apple signing"],
+    ["sign_updater_preview", "Sign only the preview updater archive"],
+    ["feed", "Push only the prepared release-data commit"],
+  ];
+  for (const [jobName, stepName] of windows) {
+    const modifiedProgram = safeInput();
+    const programWorkflow = parse(releaseWorkflow);
+    const programStep = programWorkflow.jobs[jobName].steps.find(
+      ({ name }) => name === stepName,
+    );
+    programStep.run += "\necho injected";
+    modifiedProgram.candidateWorkflow = stringify(programWorkflow);
+    modifiedProgram.candidateSize = Buffer.byteLength(
+      modifiedProgram.candidateWorkflow,
+    );
+    assert.deepEqual(
+      codes(modifiedProgram),
+      ["candidate-workflow"],
+      `${jobName}/${stepName} run`,
+    );
+
+    const tokenContext = safeInput();
+    const tokenWorkflow = parse(releaseWorkflow);
+    const tokenStep = tokenWorkflow.jobs[jobName].steps.find(
+      ({ name }) => name === stepName,
+    );
+    tokenStep.env.GITHUB_TOKEN = "${{ github.token }}";
+    tokenContext.candidateWorkflow = stringify(tokenWorkflow);
+    tokenContext.candidateSize = Buffer.byteLength(tokenContext.candidateWorkflow);
+    assert.deepEqual(
+      codes(tokenContext),
+      ["candidate-workflow"],
+      `${jobName}/${stepName} token`,
+    );
+  }
+
+  const relocatedToken = safeInput();
+  const relocatedWorkflow = parse(releaseWorkflow);
+  const publishTokenStep = relocatedWorkflow.jobs.publish.steps.find(
+    (step) => step.env?.GH_TOKEN === "${{ github.token }}",
+  );
+  delete publishTokenStep.env.GH_TOKEN;
+  const appleSigner = relocatedWorkflow.jobs.apple_sign.steps.find(
+    ({ name }) => name ===
+      "Apply preview ad-hoc or fail-closed stable Apple signing",
+  );
+  appleSigner.env.GH_TOKEN = "${{ github.token }}";
+  relocatedToken.candidateWorkflow = stringify(relocatedWorkflow);
+  relocatedToken.candidateSize = Buffer.byteLength(
+    relocatedToken.candidateWorkflow,
+  );
+  assert.deepEqual(codes(relocatedToken), ["candidate-workflow"]);
 });
 
 test("fails closed on non-object input and non-canonical immutable SHAs", () => {
@@ -329,6 +429,20 @@ test("enforces regular candidate blob type, size, bytes, and policy diagnostics"
   oversized.candidateWorkflow += " ";
   oversized.candidateSize += 1;
   assert.deepEqual(codes(oversized), ["candidate-blob-boundary"]);
+
+  for (const canonicalWorkflow of [
+    undefined,
+    "",
+    `${releaseWorkflow}\n#${" ".repeat(MAX_BOUNDARY_BYTES)}`,
+  ]) {
+    const invalidCanonical = safeInput();
+    invalidCanonical.canonicalWorkflow = canonicalWorkflow;
+    assert.deepEqual(codes(invalidCanonical), ["candidate-workflow"]);
+  }
+
+  const exactCanonical = safeInput();
+  exactCanonical.canonicalWorkflow = maximumWorkflow;
+  assert.deepEqual(codes(exactCanonical), []);
 });
 
 test("sorts independent boundary diagnostics by stable public code", () => {
@@ -348,8 +462,10 @@ test("CLI reads bounded files, preserves NUL path records, and exposes exit stat
   t.after(() => rm(directory, { recursive: true, force: true }));
   const diffPath = join(directory, "changed-paths.z");
   const candidatePath = join(directory, "candidate.yml");
+  const canonicalPath = join(directory, "canonical.yml");
   await writeFile(diffPath, Buffer.alloc(0));
   await writeFile(candidatePath, releaseWorkflow);
+  await writeFile(canonicalPath, releaseWorkflow);
   const argumentsFor = (size = Buffer.byteLength(releaseWorkflow)) => [
     "a".repeat(40),
     "b".repeat(40),
@@ -357,6 +473,7 @@ test("CLI reads bounded files, preserves NUL path records, and exposes exit stat
     "100644",
     String(size),
     candidatePath,
+    canonicalPath,
   ];
 
   const valid = await runEvaluator(argumentsFor());
@@ -392,7 +509,7 @@ test("CLI reads bounded files, preserves NUL path records, and exposes exit stat
   assert.equal(wrongArguments.stdout, "");
   assert.equal(
     wrongArguments.stderr,
-    "anchored-policy: usage: anchored-policy.mjs BASE_SHA HEAD_SHA DIFF_Z MODE SIZE CANDIDATE.yml\n",
+    "anchored-policy: usage: anchored-policy.mjs BASE_SHA HEAD_SHA DIFF_Z MODE SIZE CANDIDATE.yml CANONICAL.yml\n",
   );
 
   const directoryInput = join(directory, "not-a-file");
@@ -404,6 +521,7 @@ test("CLI reads bounded files, preserves NUL path records, and exposes exit stat
     "100644",
     String(Buffer.byteLength(releaseWorkflow)),
     candidatePath,
+    canonicalPath,
   ]);
   assert.equal(nonFile.status, 1);
   assert.equal(
@@ -417,11 +535,13 @@ test("CLI accepts exact reader ceilings and rejects the first oversized byte", a
   t.after(() => rm(directory, { recursive: true, force: true }));
   const diffPath = join(directory, "changed-paths.z");
   const candidatePath = join(directory, "candidate.yml");
+  const canonicalPath = join(directory, "canonical.yml");
   const maximumWorkflow = `${releaseWorkflow}\n#${" ".repeat(
     MAX_BOUNDARY_BYTES - Buffer.byteLength(releaseWorkflow) - 2,
   )}`;
   await writeFile(diffPath, Buffer.alloc(0));
   await writeFile(candidatePath, maximumWorkflow);
+  await writeFile(canonicalPath, releaseWorkflow);
   const baseArguments = [
     "a".repeat(40),
     "b".repeat(40),
@@ -429,6 +549,7 @@ test("CLI accepts exact reader ceilings and rejects the first oversized byte", a
     "100644",
     String(MAX_BOUNDARY_BYTES),
     candidatePath,
+    canonicalPath,
   ];
   assert.equal((await runEvaluator(baseArguments)).status, 0);
 
@@ -456,11 +577,27 @@ test("CLI accepts exact reader ceilings and rejects the first oversized byte", a
     ...baseArguments.slice(0, 4),
     String(MAX_BOUNDARY_BYTES + 1),
     candidatePath,
+    canonicalPath,
   ]);
   assert.equal(oversizedCandidate.status, 1);
   assert.equal(oversizedCandidate.stdout, "");
   assert.equal(
     oversizedCandidate.stderr,
     "anchored-policy: candidate workflow exceeds its byte boundary\n",
+  );
+
+  await writeFile(candidatePath, releaseWorkflow);
+  await writeFile(canonicalPath, `${maximumWorkflow} `);
+  const oversizedCanonical = await runEvaluator([
+    ...baseArguments.slice(0, 4),
+    String(Buffer.byteLength(releaseWorkflow)),
+    candidatePath,
+    canonicalPath,
+  ]);
+  assert.equal(oversizedCanonical.status, 1);
+  assert.equal(oversizedCanonical.stdout, "");
+  assert.equal(
+    oversizedCanonical.stderr,
+    "anchored-policy: canonical workflow exceeds its byte boundary\n",
   );
 });

@@ -67,6 +67,19 @@ const RELEASE_ENVIRONMENTS = {
   },
 };
 
+const SOURCE_ANCHOR_DEPENDENCIES = [
+  ".github/workflows/zerglang-ide-release.yml",
+  ".github/workflows/zerglang-release-policy-anchor.yml",
+  "zerglang/ide/package-lock.json",
+  "zerglang/ide/package.json",
+  "zerglang/ide/scripts/release/anchoredSourcePolicy.mjs",
+  "zerglang/ide/scripts/release/sourceWorkflowPolicy.mjs",
+].map((path, index) => ({
+  path,
+  sha: index.toString(16).padStart(40, "0"),
+  type: "file",
+}));
+
 function healthyState(workflowState = "disabled_manually") {
   return {
     release: {
@@ -169,6 +182,17 @@ function healthyState(workflowState = "disabled_manually") {
       ],
     },
     source: {
+      defaultBranch: "development",
+      anchorDependencies: structuredClone(SOURCE_ANCHOR_DEPENDENCIES),
+      defaultBranchProtection: {
+        enforceAdmins: true,
+        requireLastPushApproval: true,
+        requireLinearHistory: true,
+        strictStatusChecks: true,
+        requiredStatusChecks: [
+          "Protected-base ZergLang release policy:15368",
+        ],
+      },
       workflows: [
         {
           path: ".github/workflows/zerglang-ide-release.yml",
@@ -202,19 +226,19 @@ function healthyState(workflowState = "disabled_manually") {
       rulesets: [
         {
           name: "ZergLang branch authority",
-          refs: ["refs/heads/zerglang"],
+          refs: ["refs/heads/development"],
           bypass: ["User:1042757"],
           rules: ["creation", "update"],
         },
         {
           name: "ZergLang branch history",
-          refs: ["refs/heads/zerglang"],
+          refs: ["refs/heads/development"],
           bypass: [],
           rules: ["deletion", "non_fast_forward"],
         },
         {
           name: "Reviewed ZergLang changes",
-          refs: ["refs/heads/zerglang"],
+          refs: ["refs/heads/development"],
           bypass: ["User:1042757"],
           rules: [
             "pull_request:rebase:1:last-push",
@@ -304,6 +328,53 @@ test("requires protected-base anchors instead of head-controlled checks", () => 
     "workflow-state",
     "workflow-state",
   ]);
+});
+
+test("binds the source anchor bytes and protections to default development", () => {
+  const wrongDefault = healthyState();
+  wrongDefault.source.defaultBranch = "zerglang";
+  assert.deepEqual(errorCodes(wrongDefault), ["source-default-branch-contract"]);
+
+  for (const mutate of [
+    (dependencies) => { dependencies.pop(); },
+    (dependencies) => { dependencies[0].path = ".github/workflows/other.yml"; },
+    (dependencies) => { dependencies[0].sha = "moving"; },
+    (dependencies) => { dependencies[0].type = "dir"; },
+    (dependencies) => { dependencies.push(structuredClone(dependencies[0])); },
+  ]) {
+    const state = healthyState();
+    mutate(state.source.anchorDependencies);
+    assert.deepEqual(errorCodes(state), ["source-anchor-dependencies"]);
+  }
+
+  for (const mutate of [
+    (protection) => { protection.enforceAdmins = false; },
+    (protection) => { protection.requireLastPushApproval = false; },
+    (protection) => { protection.requireLinearHistory = false; },
+    (protection) => { protection.strictStatusChecks = false; },
+    (protection) => { protection.requiredStatusChecks = ["ZergLang release policy:15368"]; },
+  ]) {
+    const state = healthyState();
+    mutate(state.source.defaultBranchProtection);
+    assert.deepEqual(
+      errorCodes(state),
+      ["source-default-branch-protection"],
+    );
+  }
+
+  const reviewed = healthyState().source.rulesets.find(
+    ({ name }) => name === "Reviewed ZergLang changes",
+  );
+  assert.deepEqual(reviewed, {
+    name: "Reviewed ZergLang changes",
+    refs: ["refs/heads/development"],
+    bypass: ["User:1042757"],
+    rules: [
+      "pull_request:rebase:1:last-push",
+      "required_linear_history",
+      "required_status_checks:Protected-base ZergLang release policy:15368:strict",
+    ],
+  });
 });
 
 test("requires active workflows only in live mode", () => {
@@ -845,6 +916,31 @@ test("collects settings through one injected read-only HTTP boundary", async () 
       },
     ],
     [
+      "Epoch-ML/zerg:",
+      { default_branch: "development" },
+    ],
+    ...SOURCE_ANCHOR_DEPENDENCIES.map((dependency) => [
+      `Epoch-ML/zerg:contents/${dependency.path}?ref=development`,
+      dependency,
+    ]),
+    [
+      "Epoch-ML/zerg:branches/development/protection",
+      {
+        enforce_admins: { enabled: true },
+        required_linear_history: { enabled: true },
+        required_pull_request_reviews: {
+          require_last_push_approval: true,
+        },
+        required_status_checks: {
+          strict: true,
+          checks: [{
+            context: "Protected-base ZergLang release policy",
+            app_id: 15368,
+          }],
+        },
+      },
+    ],
+    [
       "Epoch-ML/zerg:actions/workflows",
       { workflows: [{ path: ".github/workflows/zerglang-ide-release.yml", state: "disabled_manually" }] },
     ],
@@ -873,7 +969,7 @@ test("collects settings through one injected read-only HTTP boundary", async () 
       {
         name: "ZergLang branch history",
         enforcement: "active",
-        conditions: { ref_name: { include: ["refs/heads/zerglang"] } },
+        conditions: { ref_name: { include: ["refs/heads/development"] } },
         bypass_actors: [],
         rules: [{ type: "deletion" }, { type: "non_fast_forward" }],
       },
@@ -936,6 +1032,17 @@ test("collects settings through one injected read-only HTTP boundary", async () 
       ],
     },
     source: {
+      defaultBranch: "development",
+      anchorDependencies: SOURCE_ANCHOR_DEPENDENCIES,
+      defaultBranchProtection: {
+        enforceAdmins: true,
+        requireLastPushApproval: true,
+        requireLinearHistory: true,
+        strictStatusChecks: true,
+        requiredStatusChecks: [
+          "Protected-base ZergLang release policy:15368",
+        ],
+      },
       workflows: [
         {
           path: ".github/workflows/zerglang-ide-release.yml",
@@ -959,7 +1066,7 @@ test("collects settings through one injected read-only HTTP boundary", async () 
       rulesets: [
         {
           name: "ZergLang branch history",
-          refs: ["refs/heads/zerglang"],
+          refs: ["refs/heads/development"],
           bypass: [],
           rules: ["deletion", "non_fast_forward"],
         },
