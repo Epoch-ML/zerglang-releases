@@ -7,6 +7,7 @@ const SOURCE_REPOSITORY = "Epoch-ML/zerg";
 const RELEASE_WORKFLOW = ".github/workflows/release.yml";
 const RELEASE_POLICY_ANCHOR = ".github/workflows/policy-anchor.yml";
 const SOURCE_WORKFLOW = ".github/workflows/zerglang-ide-release.yml";
+const PAIRED_SOURCE_WORKFLOW = ".github/workflows/zergchat-native-release.yml";
 const SOURCE_POLICY_ANCHOR =
   ".github/workflows/zerglang-release-policy-anchor.yml";
 const SOURCE_DEFAULT_BRANCH = "development";
@@ -441,6 +442,14 @@ export function auditRepositoryState(state, { phase } = {}) {
           "protected-base policy anchor must be active",
       ));
     }
+  }
+  if (
+    findWorkflow(source.workflows, PAIRED_SOURCE_WORKFLOW)?.state !== "active"
+  ) {
+    errors.push(diagnostic(
+      "workflow-state",
+      "the paired ZergChat source request workflow must remain active",
+    ));
   }
 
   const environments = requireObject(
