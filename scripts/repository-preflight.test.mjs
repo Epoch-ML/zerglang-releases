@@ -741,6 +741,26 @@ test("uses one authenticated read-only GitHub request boundary", async () => {
   ]);
 });
 
+test("requests repository metadata without an empty-path trailing slash", async () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ default_branch: "main" }),
+    };
+  };
+
+  const result = await requestGitHub(
+    { repository: "Epoch-ML/zerg", path: "" },
+    { token: "test-token", fetchImpl },
+  );
+
+  assert.deepEqual(result, { default_branch: "main" });
+  assert.deepEqual(calls, ["https://api.github.com/repos/Epoch-ML/zerg"]);
+});
+
 test("handles only an explicitly allowed missing GitHub resource", async () => {
   const fetchImpl = async () => ({
     ok: false,
