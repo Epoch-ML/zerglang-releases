@@ -247,6 +247,46 @@ test("binds run programs and every workflow context to canonical base bytes", ()
   ]);
 });
 
+test("binds every job and step execution metadata field to canonical data", () => {
+  const mutations = [
+    ["shell", (workflow) => {
+      findStep(workflow, "validate", "Require protected main")
+        .shell = "pwsh";
+    }],
+    ["continue-on-error", (workflow) => {
+      findStep(workflow, "validate", "Require protected main")
+        ["continue-on-error"] = true;
+    }],
+    ["literal step env", (workflow) => {
+      findStep(workflow, "validate", "Require protected main").env = {
+        NODE_OPTIONS: "--require=./unreviewed.cjs",
+      };
+    }],
+    ["literal job env", (workflow) => {
+      workflow.jobs.validate.env = {
+        NODE_OPTIONS: "--require=./unreviewed.cjs",
+      };
+    }],
+    ["working directory", (workflow) => {
+      findStep(workflow, "validate", "Require protected main")
+        ["working-directory"] = "/tmp/unreviewed";
+    }],
+    ["step name", (workflow) => {
+      workflow.jobs.validate.steps[0].name = "Unreviewed checkout label";
+    }],
+  ];
+
+  for (const [name, mutate] of mutations) {
+    const candidate = releaseVariant(mutate);
+    assert.ok(
+      canonicalDiagnosticIdentities(candidate).includes(
+        "execution-metadata-boundary:workflow:job",
+      ),
+      name,
+    );
+  }
+});
+
 test("accepts a release-data feed and a fresh credential-free signed smoke job", () => {
   assert.deepEqual(diagnosticIdentities(cutoverReleaseVariant()), []);
 });
