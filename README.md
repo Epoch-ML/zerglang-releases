@@ -133,8 +133,9 @@ The `release-data` branch contains only the deployed `site/` tree. Protect it
 with two active rulesets: creation/update may be bypassed only by the dedicated
 feed deploy key, while deletion and non-fast-forward updates have no bypass.
 Protect `main` with rebase-only pull requests, one approval, approval after the
-last push, strict `Release policy`, and linear history. Apply the equivalent
-strict `ZergLang release policy` contract to the source `zerglang` branch.
+last push, strict `Release policy`, and linear history. Protect the shared
+source `development` branch with the product-neutral development rulesets and
+both strict `ZergLang release policy` and `ZergChat release policy` checks.
 
 Before cutover, keep both release workflows manually disabled and run:
 

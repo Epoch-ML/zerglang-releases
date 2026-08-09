@@ -250,28 +250,7 @@ function healthyState(workflowState = "disabled_manually") {
       },
       repositorySecrets: [],
       rulesets: [
-        {
-          name: "ZergLang branch authority",
-          refs: ["refs/heads/development"],
-          bypass: ["User:1042757"],
-          rules: ["creation", "update"],
-        },
-        {
-          name: "ZergLang branch history",
-          refs: ["refs/heads/development"],
-          bypass: [],
-          rules: ["deletion", "non_fast_forward"],
-        },
-        {
-          name: "Reviewed ZergLang changes",
-          refs: ["refs/heads/development"],
-          bypass: ["User:1042757"],
-          rules: [
-            "pull_request:rebase:1:last-push",
-            "required_linear_history",
-            "required_status_checks:Protected-base ZergLang release policy:15368:strict",
-          ],
-        },
+        ...structuredClone(SHARED_SOURCE_BRANCH_RULESETS),
         {
           name: "Desktop release tag authority",
           refs: [
@@ -395,7 +374,7 @@ test("requires protected-base anchors instead of head-controlled checks", () => 
     rule.replace("Protected-base release policy", "Release policy")
   );
   const sourceReview = state.source.rulesets.find(
-    ({ name }) => name === "Reviewed ZergLang changes",
+    ({ name }) => name === "Reviewed development changes",
   );
   sourceReview.rules = sourceReview.rules.map((rule) =>
     rule.replace(
@@ -445,16 +424,17 @@ test("binds the source anchor bytes and protections to default development", () 
   }
 
   const reviewed = healthyState().source.rulesets.find(
-    ({ name }) => name === "Reviewed ZergLang changes",
+    ({ name }) => name === "Reviewed development changes",
   );
   assert.deepEqual(reviewed, {
-    name: "Reviewed ZergLang changes",
+    name: "Reviewed development changes",
     refs: ["refs/heads/development"],
     bypass: ["User:1042757"],
     rules: [
       "pull_request:rebase:1:last-push",
       "required_linear_history",
       "required_status_checks:Protected-base ZergLang release policy:15368:strict",
+      "required_status_checks:Protected-base ZergChat release policy:15368:strict",
     ],
   });
 });
@@ -488,7 +468,7 @@ test("fails closed on mutable releases, unsafe Pages, credentials, or missing ru
     ({ name }) => name !== "ZergLang feed history",
   );
   state.source.rulesets = state.source.rulesets.filter(
-    ({ name }) => name !== "Reviewed ZergLang changes",
+    ({ name }) => name !== "Reviewed development changes",
   );
 
   assert.deepEqual(
@@ -1069,7 +1049,7 @@ test("collects settings through one injected read-only HTTP boundary", async () 
     [
       "Epoch-ML/zerg:rulesets/3",
       {
-        name: "ZergLang branch history",
+        name: "Development branch history",
         enforcement: "active",
         conditions: { ref_name: { include: ["refs/heads/development"] } },
         bypass_actors: [],
@@ -1167,7 +1147,7 @@ test("collects settings through one injected read-only HTTP boundary", async () 
       deployKeys: [],
       rulesets: [
         {
-          name: "ZergLang branch history",
+          name: "Development branch history",
           refs: ["refs/heads/development"],
           bypass: [],
           rules: ["deletion", "non_fast_forward"],
