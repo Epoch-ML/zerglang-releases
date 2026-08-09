@@ -152,27 +152,33 @@ function canonicalMetadataValue(value) {
 
 function collectExecutionMetadata(workflow) {
   const jobs = requireMapping(workflow.jobs, "workflow jobs");
-  return Object.keys(jobs)
-    .sort()
-    .map((jobName) => {
-      const job = requireMapping(jobs[jobName], `${jobName} job`);
-      const jobMetadata = Object.fromEntries(
-        Object.entries(job).filter(([key]) => key !== "steps"),
-      );
-      const steps = Array.isArray(job.steps)
-        ? job.steps.map((rawStep, index) => {
-            const step = requireMapping(rawStep, `${jobName} step ${index + 1}`);
-            return canonicalMetadataValue(Object.fromEntries(
-              Object.entries(step).filter(([key]) => key !== "run"),
-            ));
-          })
-        : [];
-      return {
-        job: jobName,
-        metadata: canonicalMetadataValue(jobMetadata),
-        steps,
-      };
-    });
+  const rootMetadata = Object.fromEntries(
+    Object.entries(workflow).filter(([key]) => key !== "jobs"),
+  );
+  return {
+    root: canonicalMetadataValue(rootMetadata),
+    jobs: Object.keys(jobs)
+      .sort()
+      .map((jobName) => {
+        const job = requireMapping(jobs[jobName], `${jobName} job`);
+        const jobMetadata = Object.fromEntries(
+          Object.entries(job).filter(([key]) => key !== "steps"),
+        );
+        const steps = Array.isArray(job.steps)
+          ? job.steps.map((rawStep, index) => {
+              const step = requireMapping(rawStep, `${jobName} step ${index + 1}`);
+              return canonicalMetadataValue(Object.fromEntries(
+                Object.entries(step).filter(([key]) => key !== "run"),
+              ));
+            })
+          : [];
+        return {
+          job: jobName,
+          metadata: canonicalMetadataValue(jobMetadata),
+          steps,
+        };
+      }),
+  };
 }
 
 function jobContainsContractToken(serializedJob, token) {
