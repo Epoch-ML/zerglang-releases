@@ -100,14 +100,6 @@ function collectSecretReferences(value, references = []) {
   return references;
 }
 
-function collectSecretNames(value) {
-  return new Set(
-    collectSecretReferences(value)
-      .filter(({ canonical }) => canonical)
-      .map(({ name }) => name),
-  );
-}
-
 function collectSecretReferencesOutsideStepEnv(step) {
   const references = [];
   for (const [key, value] of Object.entries(step)) {
