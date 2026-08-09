@@ -268,6 +268,27 @@ test("binds every run program and token context to protected canonical bytes", (
   assert.deepEqual(codes(implicitToken), ["candidate-workflow"]);
 });
 
+test("binds root execution metadata to protected canonical bytes", () => {
+  const mutations = [
+    ["root environment", (workflow) => {
+      workflow.env = { NODE_OPTIONS: "--import=data/unreviewed.mjs" };
+    }],
+    ["root run defaults", (workflow) => {
+      workflow.defaults = { run: { shell: "python" } };
+    }],
+  ];
+
+  for (const [name, mutate] of mutations) {
+    const input = safeInput();
+    const workflow = parse(releaseWorkflow);
+    mutate(workflow);
+    input.candidateWorkflow = stringify(workflow);
+    input.candidateSize = Buffer.byteLength(input.candidateWorkflow);
+
+    assert.deepEqual(codes(input), ["candidate-workflow"], name);
+  }
+});
+
 test("fails closed on non-object input and non-canonical immutable SHAs", () => {
   for (const input of [null, [], "candidate", 42]) {
     assert.throws(
