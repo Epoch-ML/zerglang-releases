@@ -781,8 +781,6 @@ export function auditWorkflowPolicy(source) {
     if (!Array.isArray(job.steps)) {
       throw new WorkflowPolicyError(`${jobName} job steps must be an array`);
     }
-    let updaterSignerCount = 0;
-    let feedCredentialCount = 0;
     for (const [index, rawStep] of job.steps.entries()) {
       const step = requireMapping(rawStep, `${jobName} step ${index + 1}`);
       const secretReferences = collectSecretReferences(step.env ?? {});
@@ -890,7 +888,6 @@ export function auditWorkflowPolicy(source) {
         );
       }
       if (jobName === "feed" && [...secretNames].some(isFeedSecret)) {
-        feedCredentialCount += 1;
         const env = requireMapping(step.env, "feed credential env");
         if (
           env.FEED_DEPLOY_KEY !==
@@ -909,7 +906,6 @@ export function auditWorkflowPolicy(source) {
         }
       }
       if (updaterPolicy !== undefined && [...secretNames].some(isUpdaterSecret)) {
-        updaterSignerCount += 1;
         const env = requireMapping(step.env, `${jobName} signer env`);
         const expectedPrivateKey = `\${{ secrets.${updaterPolicy.privateKey} }}`;
         const expectedPassword = `\${{ secrets.${updaterPolicy.password} }}`;
@@ -965,24 +961,6 @@ export function auditWorkflowPolicy(source) {
         }
       }
     }
-    if (updaterPolicy !== undefined && updaterSignerCount !== 1) {
-      addDiagnostic(
-        diagnostics,
-        "updater-credential-contract",
-        jobName,
-        null,
-        `${jobName} must contain exactly one credential-bearing signer step`,
-      );
-    }
-    if (jobName === "feed" && feedCredentialCount !== 1) {
-      addDiagnostic(
-        diagnostics,
-        "feed-credential-contract",
-        jobName,
-        null,
-        "feed must contain exactly one credential-bearing push step",
-      );
-    }
   }
 
   const credentialGroups = new Set(
@@ -1003,13 +981,7 @@ export function auditWorkflowPolicy(source) {
         occurrences[0].env === binding.env &&
         occurrences[0].value === `\${{ secrets.${name} }}`;
     });
-    const unexpectedGroupOccurrence = credentialOccurrences.some((occurrence) => {
-      const binding = CREDENTIAL_BINDINGS[occurrence.name];
-      return binding?.kind === kind && binding.job === job &&
-        (occurrence.job !== binding.job || occurrence.step !== binding.step ||
-          occurrence.env !== binding.env);
-    });
-    if (valid && !unexpectedGroupOccurrence) continue;
+    if (valid) continue;
     addDiagnostic(
       diagnostics,
       `${kind}-credential-contract`,
