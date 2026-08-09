@@ -630,6 +630,36 @@ test("reports secrets at job scope and a missing source environment", () => {
   ]);
 });
 
+test("reports canonical, non-canonical, and mixed secrets at workflow scope", () => {
+  const canonical = releaseVariant((workflow) => {
+    workflow.env = {
+      TOKEN: "${{ secrets.UNRELATED_SERVICE_TOKEN }}",
+    };
+  });
+  assert.deepEqual(diagnosticIdentities(canonical), [
+    "secret-outside-step-env:workflow:job",
+  ]);
+
+  const nonCanonical = releaseVariant((workflow) => {
+    workflow.env = {
+      TOKEN: "${{ secrets['UNRELATED_SERVICE_TOKEN'] }}",
+    };
+  });
+  assert.deepEqual(diagnosticIdentities(nonCanonical), [
+    "secret-expression-boundary:workflow:job",
+  ]);
+
+  const mixed = releaseVariant((workflow) => {
+    workflow.env = {
+      CANONICAL: "${{ secrets.UNRELATED_SERVICE_TOKEN }}",
+      COMPUTED: "${{ secrets[format('{0}', 'TOKEN')] }}",
+    };
+  });
+  assert.deepEqual(diagnosticIdentities(mixed), [
+    "secret-expression-boundary:workflow:job",
+  ]);
+});
+
 test("requires every credential-bearing job to use its protected environment", () => {
   for (const [jobName, environment] of [
     ["build", "preview"],
