@@ -225,6 +225,10 @@ function healthyState(workflowState = "disabled_manually") {
           state: workflowState,
         },
         {
+          path: ".github/workflows/zergchat-native-release.yml",
+          state: "active",
+        },
+        {
           path: ".github/workflows/zerglang-release-policy-anchor.yml",
           state: "active",
         },
@@ -450,6 +454,46 @@ test("requires active workflows only in live mode", () => {
     ),
     ["workflow-state", "workflow-state"],
   );
+});
+
+test("requires the paired ZergChat request workflow during ZergLang cutover", () => {
+  const accepted = healthyState();
+  const acceptedStates = Object.fromEntries(
+    accepted.source.workflows.map(({ path, state }) => [path, state]),
+  );
+  assert.equal(
+    acceptedStates[".github/workflows/zerglang-ide-release.yml"],
+    "disabled_manually",
+  );
+  assert.equal(
+    acceptedStates[".github/workflows/zergchat-native-release.yml"],
+    "active",
+  );
+  assert.deepEqual(errorCodes(accepted), []);
+
+  for (const mutate of [
+    (workflows) => {
+      workflows.find(
+        ({ path }) => path === ".github/workflows/zergchat-native-release.yml",
+      ).state = "disabled_manually";
+    },
+    (workflows) => {
+      const paired = workflows.find(
+        ({ path }) => path === ".github/workflows/zergchat-native-release.yml",
+      );
+      paired.path = ".github/workflows/unknown-release.yml";
+    },
+    (workflows) => {
+      const index = workflows.findIndex(
+        ({ path }) => path === ".github/workflows/zergchat-native-release.yml",
+      );
+      workflows.splice(index, 1);
+    },
+  ]) {
+    const state = healthyState();
+    mutate(state.source.workflows);
+    assert.deepEqual(errorCodes(state), ["workflow-state"]);
+  }
 });
 
 test("fails closed on mutable releases, unsafe Pages, credentials, or missing rules", () => {
