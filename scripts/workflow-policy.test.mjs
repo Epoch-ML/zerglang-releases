@@ -1298,6 +1298,9 @@ test("destroys the source deploy key before credential-free materialization", ()
     (step) => {
       step.run += "\ngit -C source-git checkout --detach \"$EXPECTED_SHA\"";
     },
+    (step) => {
+      step.run += "\ngit -C staging checkout --detach \"$EXPECTED_SHA\"";
+    },
   ]) {
     const hostile = releaseVariant((workflow) => {
       mutate(findStep(
