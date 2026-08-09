@@ -438,6 +438,19 @@ test("rejects every additional job, including reusable workflow calls", () => {
   assert.ok(
     diagnosticIdentities(reusableCall).includes("job-contract:workflow:job"),
   );
+
+  for (const [field, value] of [
+    ["uses", "example/hostile/.github/workflows/release.yml@main"],
+    ["secrets", "inherit"],
+  ]) {
+    const reusableField = releaseVariant((workflow) => {
+      workflow.jobs.validate[field] = value;
+    });
+    assert.ok(
+      diagnosticIdentities(reusableField).includes("job-contract:validate:job"),
+      field,
+    );
+  }
 });
 
 test("rejects every secret outside the exact credential allowlist", () => {
@@ -725,12 +738,36 @@ test("does not mistake prose, quoted strings, or longer identifiers for contexts
     "secrets.DEPLOY_KEY is documentation, not an expression",
     "${{ 'secrets' }}",
     "${{ mysecrets.DEPLOY_KEY }}",
+    "${{ _secrets.DEPLOY_KEY }}",
+    "${{ secrets2.DEPLOY_KEY }}",
+    "${{ 'don''t expose secrets or }} here' }}",
+    "${{ 'quoted }} delimiter' }}-${{ 'still safe' }}",
     "https://example.test/secrets.DEPLOY_KEY",
   ]) {
     const equivalent = releaseVariant((workflow) => {
       workflow.jobs.validate.steps[0].env = { SAFE_TEXT: value };
     });
     assert.deepEqual(diagnosticIdentities(equivalent), [], value);
+  }
+});
+
+test("finds secret contexts across quoted and adjacent expressions", () => {
+  for (const expression of [
+    "${{ 'don''t' || secrets.ZERGLANG_APPLE_API_KEY_ID }}",
+    "${{ 'quoted }} delimiter' || secrets.ZERGLANG_APPLE_API_KEY_ID }}",
+    "${{ 'first expression is safe' }}-${{ true && secrets.ZERGLANG_APPLE_API_KEY_ID }}",
+    "${{ true && secrets.ZERGLANG_APPLE_API_KEY_ID }}",
+    "${{ secrets.ZERGLANG_APPLE_API_KEY_ID || true }}",
+  ]) {
+    const hostile = releaseVariant((workflow) => {
+      workflow.jobs.validate.steps[0].env = { LEAK: expression };
+    });
+    assert.ok(
+      diagnosticIdentities(hostile).includes(
+        "secret-expression-boundary:validate:Require protected main",
+      ),
+      expression,
+    );
   }
 });
 
@@ -1035,6 +1072,52 @@ test("requires exact workflow and per-job permissions", () => {
   }
 });
 
+test("requires every approved job's exact runner, permissions, environment, and actions", () => {
+  const jobNames = Object.keys(parse(releaseWorkflow).jobs);
+  for (const jobName of jobNames) {
+    const wrongRunner = releaseVariant((workflow) => {
+      workflow.jobs[jobName]["runs-on"] = "mutation-runner";
+    });
+    assert.ok(
+      diagnosticIdentities(wrongRunner).includes(`job-contract:${jobName}:job`),
+      `${jobName} runner`,
+    );
+
+    const wrongPermissions = releaseVariant((workflow) => {
+      workflow.jobs[jobName].permissions = {
+        ...workflow.jobs[jobName].permissions,
+        actions: "read",
+      };
+    });
+    assert.ok(
+      diagnosticIdentities(wrongPermissions).includes(
+        `permission-boundary:${jobName}:job`,
+      ),
+      `${jobName} permissions`,
+    );
+
+    const wrongEnvironment = releaseVariant((workflow) => {
+      workflow.jobs[jobName].environment = "mutation-environment";
+    });
+    assert.ok(
+      diagnosticIdentities(wrongEnvironment).includes(
+        `environment-boundary:${jobName}:job`,
+      ),
+      `${jobName} environment`,
+    );
+
+    const extraAction = releaseVariant((workflow) => {
+      workflow.jobs[jobName].steps.push({
+        uses: "example/hostile-action@0123456789abcdef0123456789abcdef01234567",
+      });
+    });
+    assert.ok(
+      diagnosticIdentities(extraAction).includes(`action-contract:${jobName}:job`),
+      `${jobName} actions`,
+    );
+  }
+});
+
 test("requires the exact action sequence and checkout configuration per job", () => {
   const injectedAction = releaseVariant((workflow) => {
     workflow.jobs.apple_sign.steps.unshift({
@@ -1275,6 +1358,19 @@ test("requires the exact policy job set and pinned action configuration", () => 
     }),
     policyVariant((workflow) => {
       workflow.jobs.policy["runs-on"] = "ubuntu-latest";
+    }),
+    policyVariant((workflow) => {
+      workflow.jobs.policy.uses =
+        "example/hostile/.github/workflows/release.yml@main";
+    }),
+    policyVariant((workflow) => {
+      workflow.jobs.policy.secrets = "inherit";
+    }),
+    policyVariant((workflow) => {
+      workflow.jobs.policy.environment = "protected";
+    }),
+    policyVariant((workflow) => {
+      workflow.jobs.policy.permissions = { contents: "read" };
     }),
   ];
   for (const hostile of variants) {
