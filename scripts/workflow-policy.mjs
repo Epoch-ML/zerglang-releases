@@ -140,6 +140,41 @@ function collectRunPrograms(workflow) {
   return programs;
 }
 
+function canonicalMetadataValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalMetadataValue);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, canonicalMetadataValue(value[key])]),
+  );
+}
+
+function collectExecutionMetadata(workflow) {
+  const jobs = requireMapping(workflow.jobs, "workflow jobs");
+  return Object.keys(jobs)
+    .sort()
+    .map((jobName) => {
+      const job = requireMapping(jobs[jobName], `${jobName} job`);
+      const jobMetadata = Object.fromEntries(
+        Object.entries(job).filter(([key]) => key !== "steps"),
+      );
+      const steps = Array.isArray(job.steps)
+        ? job.steps.map((rawStep, index) => {
+            const step = requireMapping(rawStep, `${jobName} step ${index + 1}`);
+            return canonicalMetadataValue(Object.fromEntries(
+              Object.entries(step).filter(([key]) => key !== "run"),
+            ));
+          })
+        : [];
+      return {
+        job: jobName,
+        metadata: canonicalMetadataValue(jobMetadata),
+        steps,
+      };
+    });
+}
+
 function jobContainsContractToken(serializedJob, token) {
   if (token !== "--draft") return serializedJob.includes(token);
   return /(?:^|[^A-Za-z0-9_-])--draft(?=$|[^A-Za-z0-9_=-])/.test(serializedJob);
@@ -607,10 +642,16 @@ export function auditWorkflowPolicy(source, canonicalSource = undefined) {
 
   if (canonicalSource !== undefined) {
     const canonicalWorkflow = parseWorkflow(canonicalSource);
-    if (
+    const runProgramsDiffer =
       JSON.stringify(collectRunPrograms(workflow)) !==
-      JSON.stringify(collectRunPrograms(canonicalWorkflow))
-    ) {
+      JSON.stringify(collectRunPrograms(canonicalWorkflow));
+    const tokenContextsDiffer =
+      JSON.stringify(collectTokenContexts(workflow)) !==
+      JSON.stringify(collectTokenContexts(canonicalWorkflow));
+    const executionMetadataDiffer =
+      JSON.stringify(collectExecutionMetadata(workflow)) !==
+      JSON.stringify(collectExecutionMetadata(canonicalWorkflow));
+    if (runProgramsDiffer) {
       addDiagnostic(
         diagnostics,
         "run-program-boundary",
@@ -619,10 +660,16 @@ export function auditWorkflowPolicy(source, canonicalSource = undefined) {
         "run step order and program bytes must match the protected canonical workflow",
       );
     }
-    if (
-      JSON.stringify(collectTokenContexts(workflow)) !==
-      JSON.stringify(collectTokenContexts(canonicalWorkflow))
-    ) {
+    if (executionMetadataDiffer && !runProgramsDiffer && !tokenContextsDiffer) {
+      addDiagnostic(
+        diagnostics,
+        "execution-metadata-boundary",
+        "workflow",
+        null,
+        "job and step execution metadata must match the protected canonical workflow",
+      );
+    }
+    if (tokenContextsDiffer) {
       addDiagnostic(
         diagnostics,
         "token-context-boundary",
