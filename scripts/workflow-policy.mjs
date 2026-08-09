@@ -110,7 +110,7 @@ function collectSecretReferencesOutsideStepEnv(step) {
 
 function collectTokenContexts(value, path = [], contexts = []) {
   if (typeof value === "string") {
-    if (value.includes("${{")) {
+    if (value.includes("${{") || path[path.length - 1] === "if") {
       contexts.push({ path: path.join("/"), value });
     }
   } else if (Array.isArray(value)) {
