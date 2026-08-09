@@ -298,6 +298,39 @@ test("requires the feed environment, read-only token, and one bounded deploy key
       "feed-credential-contract:feed:job",
     ),
   );
+
+  const wrongCanonicalValue = cutoverReleaseVariant((workflow) => {
+    const push = findStep(
+      workflow,
+      "feed",
+      "Push only the prepared release-data commit",
+    );
+    push.env.FEED_DEPLOY_KEY =
+      "prefix-${{ secrets.ZERGLANG_FEED_DEPLOY_KEY }}";
+  });
+  assert.deepEqual(diagnosticIdentities(wrongCanonicalValue), [
+    "feed-credential-contract:feed:job",
+    "feed-credential-contract:feed:Push only the prepared release-data commit",
+  ]);
+
+  const relocatedFeedKey = cutoverReleaseVariant((workflow) => {
+    const push = findStep(
+      workflow,
+      "feed",
+      "Push only the prepared release-data commit",
+    );
+    push.env.FEED_DEPLOY_KEY = "ordinary-text";
+    workflow.jobs.validate.steps.push({
+      name: "Relocated feed credential",
+      env: {
+        FEED_DEPLOY_KEY: "${{ secrets.ZERGLANG_FEED_DEPLOY_KEY }}",
+      },
+      run: "echo inert",
+    });
+  });
+  assert.deepEqual(diagnosticIdentities(relocatedFeedKey), [
+    "feed-credential-contract:feed:job",
+  ]);
 });
 
 test("rejects product execution on the Apple signer and credentials on signed smoke", () => {
@@ -1211,6 +1244,44 @@ test("binds each Apple and source credential globally to one exact step", () => 
       "source-credential-contract:build:job",
     ),
   );
+
+  for (const mutate of [
+    (workflow, step) => {
+      step.name = "Renamed source credential step";
+    },
+    (workflow, step) => {
+      step.env.RENAMED_SOURCE_KEY = step.env.SOURCE_DEPLOY_KEY;
+      delete step.env.SOURCE_DEPLOY_KEY;
+    },
+    (workflow, step) => {
+      step.env.SOURCE_DEPLOY_KEY =
+        "prefix-${{ secrets.ZERG_SOURCE_DEPLOY_KEY }}";
+    },
+  ]) {
+    const relocatedField = releaseVariant((workflow) => {
+      const step = findStep(
+        workflow,
+        "build",
+        "Fetch exact source objects with one read key",
+      );
+      mutate(workflow, step);
+    });
+    assert.deepEqual(diagnosticIdentities(relocatedField), [
+      "source-credential-contract:build:job",
+    ]);
+  }
+
+  const relocatedJob = releaseVariant((workflow) => {
+    const index = workflow.jobs.build.steps.findIndex(
+      (step) => step.name === "Fetch exact source objects with one read key",
+    );
+    const [step] = workflow.jobs.build.steps.splice(index, 1);
+    workflow.jobs.validate.steps.push(step);
+  });
+  assert.deepEqual(diagnosticIdentities(relocatedJob), [
+    "job-contract:build:job",
+    "source-credential-contract:build:job",
+  ]);
 });
 
 test("destroys the source deploy key before credential-free materialization", () => {
@@ -1220,6 +1291,9 @@ test("destroys the source deploy key before credential-free materialization", ()
     },
     (step) => {
       step.run = step.run.replace("unset SOURCE_DEPLOY_KEY", "echo key-still-exported");
+    },
+    (step) => {
+      step.run = step.run.replace('rm -f "$key_path"', "echo key-file-remains");
     },
     (step) => {
       step.run += "\ngit -C source-git checkout --detach \"$EXPECTED_SHA\"";
