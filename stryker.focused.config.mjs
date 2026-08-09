@@ -57,6 +57,7 @@ export default {
   commandRunner: {
     command: `node --test ${suite.tests.join(" ")}`,
   },
+  ignorePatterns: ["node_modules", ".stryker-tmp", "dist", "build", "target"],
   concurrency: 4,
   coverageAnalysis: "off",
   reporters: ["clear-text", "progress"],
