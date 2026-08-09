@@ -1398,6 +1398,9 @@ test("requires the exact policy job set and pinned action configuration", () => 
       workflow.jobs.policy["runs-on"] = "ubuntu-latest";
     }),
     policyVariant((workflow) => {
+      workflow.jobs.policy.steps.push({ run: "echo inert" });
+    }),
+    policyVariant((workflow) => {
       workflow.jobs.policy.uses =
         "example/hostile/.github/workflows/release.yml@main";
     }),
