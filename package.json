@@ -1,0 +1,28 @@
+{
+  "name": "zerglang-releases",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "preflight:cutover": "node scripts/repository-preflight.mjs cutover",
+    "preflight:live": "node scripts/repository-preflight.mjs live",
+    "test": "node --test scripts/*.test.mjs",
+    "test:mutation:focused": "stryker run stryker.focused.config.mjs",
+    "test:mutation": "stryker run stryker.config.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@tauri-apps/cli": "2.8.4",
+    "semver": "7.7.2",
+    "tar": "7.5.22",
+    "yaml": "2.9.0"
+  },
+  "devDependencies": {
+    "@stryker-mutator/core": "9.6.1",
+    "fast-check": "3.23.2"
+  },
+  "overrides": {
+    "qs": "6.15.3"
+  }
+}
