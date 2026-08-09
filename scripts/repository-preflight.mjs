@@ -26,6 +26,7 @@ const EXPECTED_SOURCE_DEFAULT_BRANCH_PROTECTION = Object.freeze({
   strictStatusChecks: true,
   requiredStatusChecks: Object.freeze([
     "Protected-base ZergLang release policy:15368",
+    "Protected-base ZergChat release policy:15368",
   ]),
 });
 const CANONICAL_PAGES_URL = "https://epoch-ml.github.io/zerglang-releases/";
