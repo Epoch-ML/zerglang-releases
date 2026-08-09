@@ -1,4 +1,8 @@
 const suites = Object.freeze({
+  "anchored-policy": Object.freeze({
+    source: "scripts/anchored-policy.mjs",
+    tests: ["scripts/anchored-policy.test.mjs"],
+  }),
   "feed-policy": Object.freeze({
     source: "scripts/feed-policy.mjs",
     tests: ["scripts/feed-policy.test.mjs"],
