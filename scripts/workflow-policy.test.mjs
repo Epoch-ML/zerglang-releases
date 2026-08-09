@@ -747,6 +747,7 @@ test("does not mistake prose, quoted strings, or longer identifiers for contexts
     "${{ 'safe' }} plain secrets.DEPLOY_KEY }}",
     "${{ 'unterminated safe literal",
     "${{ secrets.DEPLOY_KEY }",
+    "${{ secrets.DEPLOY_KEY }x",
     "https://example.test/secrets.DEPLOY_KEY",
   ]) {
     const equivalent = releaseVariant((workflow) => {
