@@ -259,6 +259,13 @@ test("binds every run program and token context to protected canonical bytes", (
     relocatedToken.candidateWorkflow,
   );
   assert.deepEqual(codes(relocatedToken), ["candidate-workflow"]);
+
+  const implicitToken = safeInput();
+  const implicitTokenWorkflow = parse(releaseWorkflow);
+  implicitTokenWorkflow.jobs.validate.steps[0].if = "github.token";
+  implicitToken.candidateWorkflow = stringify(implicitTokenWorkflow);
+  implicitToken.candidateSize = Buffer.byteLength(implicitToken.candidateWorkflow);
+  assert.deepEqual(codes(implicitToken), ["candidate-workflow"]);
 });
 
 test("fails closed on non-object input and non-canonical immutable SHAs", () => {
