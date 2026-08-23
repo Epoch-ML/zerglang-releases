@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zerglang.dev/schemas/benchmark-publication-request.schema.json",
+  "title": "ZergLang benchmark publication request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "run_id", "content_sha256", "suite", "source", "workflow",
+    "execution", "platform", "model", "timestamps", "status", "artifacts",
+    "disclosure", "signature"
+  ],
+  "properties": {
+    "schema": {"const": "zerglang.benchmark-publication-request/1"},
+    "run_id": {"type": "string", "pattern": "^run-[0-9a-f]{32}$"},
+    "content_sha256": {"$ref": "#/$defs/sha256"},
+    "suite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "dataset_id", "profile_id", "profile_identity", "lane", "view"],
+      "properties": {
+        "id": {"const": "zl256"},
+        "dataset_id": {"$ref": "#/$defs/sha256"},
+        "profile_id": {"$ref": "#/$defs/identifier"},
+        "profile_identity": {"$ref": "#/$defs/sha256"},
+        "lane": {"enum": ["conformance", "performance", "synthesis"]},
+        "view": {"enum": ["current", "roadmap"]}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "ref", "commit_sha", "release"],
+      "properties": {
+        "repository": {"const": "Epoch-ML/zerg"},
+        "ref": {"type": "string", "pattern": "^refs/(heads|tags)/[A-Za-z0-9][A-Za-z0-9._/-]*$", "maxLength": 256},
+        "commit_sha": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
+        "release": {"type": ["string", "null"], "minLength": 1, "maxLength": 128}
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "url", "run_id", "run_attempt", "event"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "url": {"type": "string", "format": "uri", "pattern": "^https://github\\.com/Epoch-ML/zerg/actions/runs/[1-9][0-9]*$"},
+        "run_id": {"$ref": "#/$defs/decimalId"},
+        "run_attempt": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "event": {"enum": ["push", "release", "schedule", "workflow_dispatch"]}
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["compiler_id", "executor_sha256", "harness_version", "command", "filters", "shards"],
+      "properties": {
+        "compiler_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "executor_sha256": {"$ref": "#/$defs/sha256"},
+        "harness_version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$"},
+        "command": {"type": "array", "minItems": 1, "maxItems": 128, "items": {"type": "string", "minLength": 1, "maxLength": 1024}},
+        "filters": {
+          "type": "object",
+          "propertyNames": {"$ref": "#/$defs/identifier"},
+          "additionalProperties": {
+            "oneOf": [
+              {"type": "string", "minLength": 1, "maxLength": 256},
+              {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 256}}
+            ]
+          }
+        },
+        "shards": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["count", "completed"],
+          "properties": {
+            "count": {"type": "integer", "minimum": 1, "maximum": 1000000},
+            "completed": {"type": "array", "uniqueItems": true, "items": {"type": "integer", "minimum": 0}}
+          }
+        }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "os", "arch", "machine", "toolchain"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "os": {"$ref": "#/$defs/identifier"},
+        "arch": {"$ref": "#/$defs/identifier"},
+        "machine": {"type": "string", "minLength": 1, "maxLength": 512},
+        "toolchain": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    },
+    "model": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["provider", "model", "adapter", "temperature", "seed"],
+          "properties": {
+            "provider": {"type": "string", "minLength": 1, "maxLength": 128},
+            "model": {"type": "string", "minLength": 1, "maxLength": 256},
+            "adapter": {"type": "string", "minLength": 1, "maxLength": 256},
+            "temperature": {"type": ["string", "null"], "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+            "seed": {"type": ["integer", "null"]}
+          }
+        }
+      ]
+    },
+    "timestamps": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["started_at", "completed_at"],
+      "properties": {
+        "started_at": {"$ref": "#/$defs/timestamp"},
+        "completed_at": {"$ref": "#/$defs/timestamp"}
+      }
+    },
+    "status": {"enum": ["complete", "partial"]},
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 512,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "role", "media_type", "size_bytes", "sha256"],
+        "properties": {
+          "path": {"type": "string", "pattern": "^artifacts/[A-Za-z0-9][A-Za-z0-9._/-]*$"},
+          "role": {"enum": ["candidate_source", "public_performance", "public_report", "public_results", "public_synthesis", "run_log", "schema", "task_catalog", "task_projection"]},
+          "media_type": {"enum": ["application/json", "application/schema+json", "text/plain", "text/x-zerglang"]},
+          "size_bytes": {"type": "integer", "minimum": 0, "maximum": 2147483648},
+          "sha256": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    },
+    "disclosure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_source_public", "contamination_warning", "excluded_material"],
+      "properties": {
+        "candidate_source_public": {"type": "boolean"},
+        "contamination_warning": {"type": ["string", "null"]},
+        "excluded_material": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["hidden_tests", "held_out_inputs", "held_out_oracles", "executable_oracle_code", "reference_solutions"],
+          "properties": {
+            "hidden_tests": {"const": true},
+            "held_out_inputs": {"const": true},
+            "held_out_oracles": {"const": true},
+            "executable_oracle_code": {"const": true},
+            "reference_solutions": {"const": true}
+          }
+        }
+      }
+    },
+    "signature": {"type": "null"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "decimalId": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+    "slug": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+    "identifier": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "timestamp": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"}
+  }
+}

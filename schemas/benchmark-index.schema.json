@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zerglang.dev/schemas/benchmark-index.schema.json",
+  "title": "Append-only ZergLang benchmark Pages index",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "updated_at", "runs"],
+  "properties": {
+    "schema": {"const": "zerglang.benchmark-index/1"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["run_id", "suite_id", "dataset_id", "profile_id", "profile_identity", "lane", "status", "source_sha", "published_at", "manifest_path", "manifest_sha256", "public_artifact_base", "release_tag", "bundle_asset", "bundle_sha256"],
+        "properties": {
+          "run_id": {"type": "string", "pattern": "^run-[0-9a-f]{32}$"},
+          "suite_id": {"type": "string"},
+          "dataset_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "profile_id": {"type": "string"},
+          "profile_identity": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "lane": {"enum": ["conformance", "performance", "synthesis"]},
+          "status": {"const": "complete"},
+          "source_sha": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
+          "published_at": {"type": "string", "format": "date-time"},
+          "manifest_path": {"type": "string", "pattern": "^/benchmarks/runs/run-[0-9a-f]{32}/manifest\\.json$"},
+          "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "public_artifact_base": {"type": "string", "pattern": "^/benchmarks/runs/run-[0-9a-f]{32}/artifacts/$"},
+          "release_tag": {"type": "string", "pattern": "^zlbench-run-[0-9a-f]{32}$"},
+          "bundle_asset": {"type": "string", "pattern": "^zlbench-run-[0-9a-f]{32}\\.tar\\.gz$"},
+          "bundle_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    }
+  }
+}

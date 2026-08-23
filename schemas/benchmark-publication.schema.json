@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zerglang.dev/schemas/benchmark-publication.schema.json",
+  "title": "Signed public ZergLang benchmark manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "request", "publication", "signature"],
+  "properties": {
+    "schema": {"const": "zerglang.benchmark-publication/1"},
+    "request": {"$ref": "benchmark-publication-request.schema.json"},
+    "publication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "release_tag", "bundle_asset", "bundle_sha256", "public_artifact_base", "published_at"],
+      "properties": {
+        "repository": {"const": "Epoch-ML/zerglang-releases"},
+        "release_tag": {"type": "string", "pattern": "^zlbench-run-[0-9a-f]{32}$"},
+        "bundle_asset": {"type": "string", "pattern": "^zlbench-run-[0-9a-f]{32}\\.tar\\.gz$"},
+        "bundle_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "public_artifact_base": {"type": "string", "pattern": "^/benchmarks/runs/run-[0-9a-f]{32}/artifacts/$"},
+        "published_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "key_id", "value"],
+      "properties": {
+        "algorithm": {"const": "Ed25519"},
+        "key_id": {"type": "string", "pattern": "^zlbench-ed25519-[0-9]{4}-[0-9]{2}(?:-[a-z0-9-]+)?$"},
+        "value": {"type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$"}
+      }
+    }
+  }
+}

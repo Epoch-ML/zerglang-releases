@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zerglang.dev/schemas/benchmark-task-2.json",
+  "title": "ZergLang ZL256 task with fixture maturity",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "id", "revision", "title", "maturity", "category", "edition", "preview", "domains", "modalities", "tiers", "clauses", "boundaries", "source", "execution", "cases", "synthesis", "performance", "limits", "provenance"],
+  "properties": {
+    "schema": {"const": "zerglang.benchmark-task/2"},
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]*/[a-z0-9][a-z0-9-]*$"},
+    "revision": {"type": "integer", "minimum": 1},
+    "title": {"type": "string", "minLength": 1},
+    "maturity": {"enum": ["scaffold", "executable", "verified"]},
+    "category": {"enum": ["shared", "algorithm", "compute", "state", "flow", "optimize", "integration"]},
+    "edition": {"enum": ["core-0", "core-1"]},
+    "preview": {"enum": ["shared", "compute", "state", "flow", "optimize", "stable"]},
+    "domains": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/domain"}},
+    "modalities": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["interpreted", "compiled"]}},
+    "tiers": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["interpreter", "c", "llvm-jit", "aot"]}},
+    "clauses": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "pattern": "^C[01]-[A-Z][A-Z0-9-]*-[0-9]{3}$"}},
+    "boundaries": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/boundary"}},
+    "source": {"$ref": "#/$defs/source"},
+    "execution": {"$ref": "#/$defs/execution"},
+    "cases": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/case"}},
+    "synthesis": {"$ref": "#/$defs/synthesis"},
+    "performance": {"$ref": "#/$defs/performance"},
+    "limits": {"$ref": "#/$defs/limits"},
+    "provenance": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/provenance"}}
+  },
+  "$defs": {
+    "domain": {"enum": ["algorithm", "compute", "state", "flow", "optimize"]},
+    "portablePath": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"},
+    "positiveDecimal": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+    "boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "target", "disposition"],
+      "properties": {
+        "source": {"$ref": "#/$defs/domain"},
+        "target": {"$ref": "#/$defs/domain"},
+        "disposition": {"enum": ["direct", "device-run", "store-transact", "flow-engine-start", "optimizer-run", "owned-return", "forbidden", "post-commit", "recorded-activity", "report-or-pure", "sealed-compute"]}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entry", "files"],
+      "properties": {
+        "entry": {"$ref": "#/$defs/portablePath"},
+        "files": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/portablePath"}}
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "selector", "executors", "platforms"],
+      "properties": {
+        "operation": {"enum": ["compile", "package", "algorithm", "dynamic", "adaptation", "compute", "state", "flow", "optimize", "artifact-roundtrip"]},
+        "selector": {"type": "string", "minLength": 1},
+        "executors": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["compiler-frontend", "algorithm-interpreter", "algorithm-c", "algorithm-llvm-jit", "algorithm-aot", "compute-scalar", "compute-apple-simd", "state-reference", "state-compiled", "flow-reducer", "flow-state-machine", "flow-file-journal", "optimize-exhaustive", "optimize-batched"]}},
+        "platforms": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["portable", "linux", "macos-arm64"]}},
+        "input_order": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "field": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value"],
+      "properties": {"name": {"type": "string", "minLength": 1}, "value": {"$ref": "#/$defs/value"}}
+    },
+    "value": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["type"], "properties": {"type": {"const": "unit"}}},
+        {"type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": {"type": {"const": "bool"}, "value": {"type": "boolean"}}},
+        {"type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": {"type": {"const": "integer"}, "value": {"type": "string", "pattern": "^(0|-?[1-9][0-9]*)$"}}},
+        {"type": "object", "additionalProperties": false, "required": ["type", "format", "bits"], "properties": {"type": {"const": "float"}, "format": {"enum": ["binary32", "binary64"]}, "bits": {"type": "string"}}, "allOf": [{"if": {"properties": {"format": {"const": "binary32"}}}, "then": {"properties": {"bits": {"pattern": "^0x[0-9a-f]{8}$"}}}}, {"if": {"properties": {"format": {"const": "binary64"}}}, "then": {"properties": {"bits": {"pattern": "^0x[0-9a-f]{16}$"}}}}]},
+        {"type": "object", "additionalProperties": false, "required": ["type", "value"], "properties": {"type": {"const": "text"}, "value": {"type": "string"}}},
+        {"type": "object", "additionalProperties": false, "required": ["type", "hex"], "properties": {"type": {"const": "bytes"}, "hex": {"type": "string", "pattern": "^(?:[0-9a-f]{2})*$"}}},
+        {"type": "object", "additionalProperties": false, "required": ["type", "items"], "properties": {"type": {"const": "sequence"}, "items": {"type": "array", "items": {"$ref": "#/$defs/value"}}}},
+        {"type": "object", "additionalProperties": false, "required": ["type", "fields"], "properties": {"type": {"const": "record"}, "fields": {"type": "array", "items": {"$ref": "#/$defs/field"}}}},
+        {"type": "object", "additionalProperties": false, "required": ["type", "case", "fields"], "properties": {"type": {"const": "variant"}, "case": {"type": "string", "minLength": 1}, "fields": {"type": "array", "items": {"$ref": "#/$defs/field"}}}}
+      ]
+    },
+    "oracle": {
+      "oneOf": [
+        {"type": "object", "additionalProperties": false, "required": ["kind", "value"], "properties": {"kind": {"enum": ["value", "trace", "history", "evidence"]}, "value": {"$ref": "#/$defs/value"}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "code"], "properties": {"kind": {"const": "diagnostic"}, "code": {"type": "string", "minLength": 1}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "evaluator"], "properties": {"kind": {"const": "property"}, "evaluator": {"$ref": "#/$defs/portablePath"}}}
+      ]
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "visibility", "input", "oracle"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+        "visibility": {"enum": ["public", "held-out"]},
+        "input": {"$ref": "#/$defs/value"},
+        "oracle": {"$ref": "#/$defs/oracle"}
+      }
+    },
+    "synthesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eligible"],
+      "properties": {
+        "eligible": {"type": "boolean"},
+        "prompt": {"$ref": "#/$defs/portablePath"},
+        "interface": {"$ref": "#/$defs/portablePath"},
+        "public_cases": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "held_out_cases": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}
+      }
+    },
+    "performance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eligible"],
+      "properties": {"eligible": {"type": "boolean"}, "warmups": {"type": "integer", "minimum": 0}, "samples": {"type": "integer", "minimum": 1}}
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timeout_ms", "memory_bytes", "operations"],
+      "properties": {"timeout_ms": {"type": "integer", "minimum": 1}, "memory_bytes": {"$ref": "#/$defs/positiveDecimal"}, "operations": {"$ref": "#/$defs/positiveDecimal"}}
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "source", "license"],
+      "properties": {
+        "kind": {"enum": ["original", "adapted"]},
+        "source": {"type": "string", "minLength": 1},
+        "license": {"type": "string", "minLength": 1},
+        "commit": {"type": "string", "minLength": 1},
+        "case_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "transformation": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

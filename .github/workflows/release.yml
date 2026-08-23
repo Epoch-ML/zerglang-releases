@@ -26,7 +26,9 @@ on:
         required: true
 
 concurrency:
-  group: zerglang-ide-release
+  # Both workflows commit and deploy the same Pages tree. This lock prevents a
+  # verified updater manifest and a benchmark index from racing each other.
+  group: zerglang-publication
   cancel-in-progress: false
 
 jobs:

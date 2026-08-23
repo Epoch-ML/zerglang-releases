@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zerglang.dev/schemas/benchmark-report-2.json",
+  "title": "ZergLang aggregate conformance report definitions",
+  "$defs": {
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["catalog_id", "profile_id", "profile_identity", "compiler_id", "platform_id", "toolchain_id", "model_id"],
+      "properties": {
+        "catalog_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "profile_id": {"type": "string", "minLength": 1},
+        "profile_identity": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "compiler_id": {"type": "string", "minLength": 1},
+        "platform_id": {"type": "string", "minLength": 1},
+        "toolchain_id": {"type": "string", "minLength": 1},
+        "model_id": {"type": ["string", "null"]}
+      }
+    },
+    "counter": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "profile", "edition", "failures"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "profile": {"$ref": "#/$defs/counter"},
+        "edition": {"$ref": "#/$defs/counter"},
+        "failures": {"$ref": "#/$defs/counter"}
+      }
+    }
+  }
+}

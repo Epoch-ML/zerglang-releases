@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zerglang.dev/schemas/benchmark-public-catalog-1.json",
+  "title": "Contamination-safe public ZL256 catalog projection",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "dataset_id", "name", "version", "authority", "tasks"],
+  "properties": {
+    "schema": {"const": "zerglang.benchmark-public-catalog/1"},
+    "dataset_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "name": {"const": "ZL256"},
+    "version": {"type": "string", "minLength": 1},
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clauses", "boundaries"],
+      "properties": {
+        "clauses": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "boundaries": {"type": "array", "items": {"$ref": "task.schema.json#/$defs/boundary"}}
+      }
+    },
+    "tasks": {"type": "array", "items": {"$ref": "public-task.schema.json"}}
+  }
+}

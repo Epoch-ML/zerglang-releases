@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zerglang.dev/schemas/benchmark-public-synthesis-1.json",
+  "title": "Privacy-preserving ZergLang synthesis report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "catalog_id", "profile_identity", "candidate_source_public", "contamination_warning", "tasks"],
+  "properties": {
+    "schema": {"const": "zerglang.benchmark-public-synthesis/1"},
+    "catalog_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "profile_identity": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "candidate_source_public": {"type": "boolean"},
+    "contamination_warning": {"oneOf": [{"type": "null"}, {"const": "Public candidate source may contaminate future model-synthesis evaluations."}]},
+    "tasks": {"type": "array", "items": {"$ref": "#/$defs/task"}}
+  },
+  "$defs": {
+    "nullableString": {"type": ["string", "null"], "minLength": 1},
+    "backend": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["adapter", "provider", "model", "reasoning", "protocol"],
+          "properties": {
+            "adapter": {"$ref": "#/$defs/nullableString"},
+            "provider": {"$ref": "#/$defs/nullableString"},
+            "model": {"$ref": "#/$defs/nullableString"},
+            "reasoning": {"$ref": "#/$defs/nullableString"},
+            "protocol": {"$ref": "#/$defs/nullableString"}
+          }
+        }
+      ]
+    },
+    "candidate": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["artifact_path", "sha256", "public", "contamination_warning"],
+          "properties": {
+            "artifact_path": {"type": "string", "pattern": "^artifacts/candidates/(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._/-]+$"},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "public": {"const": true},
+            "contamination_warning": {"const": "Public candidate source may contaminate future model-synthesis evaluations."}
+          }
+        }
+      ]
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sample_index", "attempted", "outcome", "single_shot_pass", "repaired_pass", "repair_turns", "backend", "candidate"],
+      "properties": {
+        "sample_index": {"type": "integer", "minimum": 0},
+        "attempted": {"type": "boolean"},
+        "outcome": {"enum": ["unavailable", "adapter-failure", "wrong", "pass"]},
+        "single_shot_pass": {"type": "boolean"},
+        "repaired_pass": {"type": "boolean"},
+        "repair_turns": {"type": "integer", "minimum": 0, "maximum": 3},
+        "backend": {"$ref": "#/$defs/backend"},
+        "candidate": {"$ref": "#/$defs/candidate"}
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_id", "task_revision", "samples", "pass_at_k", "repair_at_3"],
+      "properties": {
+        "task_id": {"type": "string", "minLength": 1},
+        "task_revision": {"type": "integer", "minimum": 1},
+        "samples": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/sample"}},
+        "pass_at_k": {"type": "object", "propertyNames": {"pattern": "^[1-9][0-9]*$"}, "additionalProperties": {"$ref": "synthesis-report.schema.json#/$defs/fraction"}},
+        "repair_at_3": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["correct", "total", "rate"],
+          "properties": {
+            "correct": {"type": "integer", "minimum": 0},
+            "total": {"type": "integer", "minimum": 1},
+            "rate": {"$ref": "synthesis-report.schema.json#/$defs/fraction"}
+          }
+        }
+      }
+    }
+  }
+}

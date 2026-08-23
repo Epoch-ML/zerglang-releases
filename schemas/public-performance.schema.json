@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zerglang.dev/schemas/benchmark-public-performance-1.json",
+  "title": "Public-case-only ZergLang performance report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "metadata", "measurements"],
+  "properties": {
+    "schema": {"const": "zerglang.benchmark-public-performance/1"},
+    "metadata": {"$ref": "report.schema.json#/$defs/metadata"},
+    "measurements": {"type": "array", "items": {"$ref": "#/$defs/measurement"}}
+  },
+  "$defs": {
+    "duration": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^[0-9]+$"}]},
+    "measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_id", "task_revision", "case_id", "executor", "warmup_count", "sample_count", "sample_durations_ns", "valid", "median_ns", "mad_ns"],
+      "properties": {
+        "task_id": {"type": "string", "minLength": 1},
+        "task_revision": {"type": "integer", "minimum": 1},
+        "case_id": {"type": "string", "minLength": 1},
+        "executor": {"type": "string", "minLength": 1},
+        "warmup_count": {"type": "integer", "minimum": 0},
+        "sample_count": {"type": "integer", "minimum": 1},
+        "sample_durations_ns": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/duration"}},
+        "valid": {"type": "boolean"},
+        "median_ns": {"$ref": "#/$defs/duration"},
+        "mad_ns": {"$ref": "#/$defs/duration"}
+      }
+    }
+  }
+}

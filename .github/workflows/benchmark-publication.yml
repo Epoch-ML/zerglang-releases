@@ -1,0 +1,428 @@
+name: Publish ZLBench evidence
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "benchmark-requests/*.json"
+  workflow_dispatch:
+    inputs:
+      request_path:
+        description: Existing benchmark-requests/run-*.json locator to replay
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zerglang-publication
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate immutable delivery request
+    runs-on: ubuntu-24.04
+    outputs:
+      artifact_digest: ${{ steps.request.outputs.artifact_digest }}
+      artifact_id: ${{ steps.request.outputs.artifact_id }}
+      artifact_name: ${{ steps.request.outputs.artifact_name }}
+      run_id: ${{ steps.request.outputs.run_id }}
+      source_repository: ${{ steps.request.outputs.source_repository }}
+      source_sha: ${{ steps.request.outputs.source_sha }}
+      workflow_run_attempt: ${{ steps.request.outputs.workflow_run_attempt }}
+      workflow_run_id: ${{ steps.request.outputs.workflow_run_id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Test IDE and benchmark release policy
+        run: node --test scripts/*.test.mjs
+
+      - id: request
+        name: Resolve and validate exactly one delivery locator
+        env:
+          INPUT_REQUEST_PATH: ${{ inputs.request_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            before="${{ github.event.before }}"
+            if [[ "$before" =~ ^0+$ ]]; then
+              mapfile -t changed_files < <(
+                git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA"
+              )
+            else
+              mapfile -t changed_files < <(
+                git diff --name-only --no-renames "$before" "$GITHUB_SHA"
+              )
+            fi
+            if [[ ${#changed_files[@]} -ne 1 ]]; then
+              echo "::error::a benchmark delivery must change exactly one file"
+              exit 1
+            fi
+            request_path="${changed_files[0]}"
+          else
+            request_path="$INPUT_REQUEST_PATH"
+          fi
+
+          if [[ ! "$request_path" =~ ^benchmark-requests/run-[0-9a-f]{32}\.json$ || ! -f "$request_path" ]]; then
+            echo "::error::request must be one benchmark-requests/run-<digest>.json file"
+            exit 1
+          fi
+          normalized="$RUNNER_TEMP/benchmark-delivery.json"
+          node scripts/benchmark-publication.mjs validate-delivery "$request_path" >"$normalized"
+          run_id="$(jq -r .run_id "$normalized")"
+          if [[ "$request_path" != "benchmark-requests/${run_id}.json" ]]; then
+            echo "::error::delivery filename does not match its content-derived run ID"
+            exit 1
+          fi
+          for field in \
+            artifact_digest \
+            artifact_id \
+            artifact_name \
+            run_id \
+            source_repository \
+            source_sha \
+            workflow_run_attempt \
+            workflow_run_id; do
+            printf '%s=%s\n' "$field" "$(jq -r ".$field" "$normalized")" \
+              >>"$GITHUB_OUTPUT"
+          done
+
+  retrieve:
+    name: Retrieve and revalidate source evidence
+    needs: validate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      bundle_asset: ${{ steps.evidence.outputs.bundle_asset }}
+      bundle_sha256: ${{ steps.evidence.outputs.bundle_sha256 }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - id: source-token
+        name: Mint short-lived read token for source Actions evidence
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.ZERGLANG_BENCHMARK_PUBLISHER_APP_ID }}
+          private-key: ${{ secrets.ZERGLANG_BENCHMARK_PUBLISHER_APP_PRIVATE_KEY }}
+          owner: Epoch-ML
+          repositories: zerg
+          permission-actions: read
+          permission-metadata: read
+
+      - name: Verify the exact successful source workflow attempt and artifact
+        env:
+          ARTIFACT_DIGEST: ${{ needs.validate.outputs.artifact_digest }}
+          ARTIFACT_ID: ${{ needs.validate.outputs.artifact_id }}
+          ARTIFACT_NAME: ${{ needs.validate.outputs.artifact_name }}
+          GH_TOKEN: ${{ steps.source-token.outputs.token }}
+          SOURCE_REPOSITORY: ${{ needs.validate.outputs.source_repository }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          WORKFLOW_RUN_ATTEMPT: ${{ needs.validate.outputs.workflow_run_attempt }}
+          WORKFLOW_RUN_ID: ${{ needs.validate.outputs.workflow_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_json="$RUNNER_TEMP/source-workflow-run.json"
+          artifact_json="$RUNNER_TEMP/source-artifact.json"
+          source_ready=false
+          for attempt in {1..30}; do
+            gh api \
+              "repos/$SOURCE_REPOSITORY/actions/runs/$WORKFLOW_RUN_ID/attempts/$WORKFLOW_RUN_ATTEMPT" \
+              >"$run_json"
+            jq -e \
+              --arg source_sha "$SOURCE_SHA" \
+              --argjson expected_attempt "$WORKFLOW_RUN_ATTEMPT" \
+              '.head_sha == $source_sha and
+               .run_attempt == $expected_attempt and
+               .name == "ZergLang ZL256 benchmarks" and
+               .path == ".github/workflows/zerglang-benchmarks.yml"' \
+              "$run_json" >/dev/null
+            conclusion="$(jq -r '.conclusion // "pending"' "$run_json")"
+            if [[ "$conclusion" == "success" ]]; then
+              source_ready=true
+              break
+            fi
+            if [[ "$conclusion" != "pending" ]]; then
+              echo "::error::source workflow concluded with $conclusion"
+              exit 1
+            fi
+            if [[ "$attempt" -lt 30 ]]; then
+              sleep 10
+            fi
+          done
+          if [[ "$source_ready" != true ]]; then
+            echo "::error::source workflow did not conclude successfully"
+            exit 1
+          fi
+
+          gh api "repos/$SOURCE_REPOSITORY/actions/artifacts/$ARTIFACT_ID" \
+            >"$artifact_json"
+          jq -e \
+            --arg artifact_digest "$ARTIFACT_DIGEST" \
+            --arg artifact_name "$ARTIFACT_NAME" \
+            --arg source_sha "$SOURCE_SHA" \
+            --argjson workflow_run_id "$WORKFLOW_RUN_ID" \
+            '.name == $artifact_name and
+             .digest == $artifact_digest and
+             .expired == false and
+             .workflow_run.id == $workflow_run_id and
+             .workflow_run.head_sha == $source_sha' \
+            "$artifact_json" >/dev/null
+
+      - name: Download only the immutable artifact ID
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.validate.outputs.artifact_id }}
+          github-token: ${{ steps.source-token.outputs.token }}
+          repository: ${{ needs.validate.outputs.source_repository }}
+          run-id: ${{ needs.validate.outputs.workflow_run_id }}
+          path: incoming
+
+      - id: evidence
+        name: Validate disclosure, inventory, identity, and source binding
+        env:
+          EXPECTED_RUN_ID: ${{ needs.validate.outputs.run_id }}
+          EXPECTED_SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+          EXPECTED_WORKFLOW_ATTEMPT: ${{ needs.validate.outputs.workflow_run_attempt }}
+          EXPECTED_WORKFLOW_RUN_ID: ${{ needs.validate.outputs.workflow_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          request="$RUNNER_TEMP/validated-publication.json"
+          node scripts/benchmark-publication.mjs validate-bundle incoming >"$request"
+          jq -e \
+            --arg run_id "$EXPECTED_RUN_ID" \
+            --arg source_sha "$EXPECTED_SOURCE_SHA" \
+            --arg workflow_run_id "$EXPECTED_WORKFLOW_RUN_ID" \
+            --argjson workflow_attempt "$EXPECTED_WORKFLOW_ATTEMPT" \
+            --slurpfile source_run "$RUNNER_TEMP/source-workflow-run.json" \
+            '.run_id == $run_id and
+             .source.commit_sha == $source_sha and
+             .workflow.run_id == $workflow_run_id and
+             .workflow.run_attempt == $workflow_attempt and
+             .workflow.name == $source_run[0].name and
+             .workflow.event == $source_run[0].event and
+             (.source.ref | sub("^refs/(?:heads|tags)/"; "")) == $source_run[0].head_branch and
+             .status == "complete"' \
+            "$request" >/dev/null
+
+          mkdir -p handoff/incoming handoff/payload
+          cp -R incoming/. handoff/incoming/
+          bundle_asset="zlbench-${EXPECTED_RUN_ID}.tar.gz"
+          bundle_tar="$PWD/handoff/payload/${bundle_asset%.gz}"
+          tar --sort=name \
+            --mtime='UTC 1970-01-01' \
+            --owner=0 --group=0 --numeric-owner \
+            -C incoming \
+            -cf "$bundle_tar" .
+          gzip -n "$bundle_tar"
+          bundle_sha256="$(sha256sum "handoff/payload/$bundle_asset" | cut -d ' ' -f 1)"
+          printf 'bundle_asset=%s\n' "$bundle_asset" >>"$GITHUB_OUTPUT"
+          printf 'bundle_sha256=%s\n' "$bundle_sha256" >>"$GITHUB_OUTPUT"
+
+      - name: Transfer only the revalidated public handoff
+        uses: actions/upload-artifact@v4
+        with:
+          name: zlbench-verified-${{ needs.validate.outputs.run_id }}
+          path: handoff/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Sign and publish immutable benchmark evidence
+    needs:
+      - validate
+      - retrieve
+    runs-on: ubuntu-24.04
+    environment: benchmark-publication
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          path: index
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: zlbench-verified-${{ needs.validate.outputs.run_id }}
+          path: handoff
+
+      - name: Revalidate handoff and create dedicated benchmark signature
+        env:
+          BUNDLE_ASSET: ${{ needs.retrieve.outputs.bundle_asset }}
+          BUNDLE_SHA256: ${{ needs.retrieve.outputs.bundle_sha256 }}
+          RUN_ID: ${{ needs.validate.outputs.run_id }}
+          SIGNING_KEY_ID: ${{ secrets.ZERGLANG_BENCHMARK_SIGNING_KEY_ID }}
+          SIGNING_PRIVATE_KEY: ${{ secrets.ZERGLANG_BENCHMARK_SIGNING_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$SIGNING_KEY_ID" || -z "$SIGNING_PRIVATE_KEY" ]]; then
+            echo "::error::dedicated benchmark signing credentials are unavailable"
+            exit 1
+          fi
+          key_path="$RUNNER_TEMP/zlbench-signing-key.pem"
+          cleanup() {
+            rm -f "$key_path"
+          }
+          trap cleanup EXIT
+          umask 077
+          printf '%s\n' "$SIGNING_PRIVATE_KEY" >"$key_path"
+
+          node index/scripts/benchmark-publication.mjs validate-bundle \
+            handoff/incoming >/dev/null
+          actual_bundle_sha="$(sha256sum "handoff/payload/$BUNDLE_ASSET" | cut -d ' ' -f 1)"
+          [[ "$actual_bundle_sha" == "$BUNDLE_SHA256" ]]
+          published_at="$(node -e 'process.stdout.write(new Date().toISOString())')"
+          manifest_asset="zlbench-${RUN_ID}.manifest.json"
+          node index/scripts/benchmark-publication.mjs sign \
+            handoff/incoming \
+            --bundle-asset "$BUNDLE_ASSET" \
+            --bundle-sha256 "$BUNDLE_SHA256" \
+            --key-id "$SIGNING_KEY_ID" \
+            --keys index/site/benchmarks/keys.json \
+            --output "handoff/payload/$manifest_asset" \
+            --private-key "$key_path" \
+            --published-at "$published_at" \
+            >/dev/null
+          (
+            cd handoff/payload
+            sha256sum "$BUNDLE_ASSET" "$manifest_asset" >SHA256SUMS
+          )
+
+      - name: Create append-only benchmark GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ needs.validate.outputs.run_id }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_TAG="zlbench-${RUN_ID}"
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::benchmark release already exists and cannot be overwritten: $RELEASE_TAG"
+            exit 1
+          fi
+          notes="$RUNNER_TEMP/zlbench-release-notes.md"
+          {
+            echo "Official ZergLang benchmark evidence from source commit \`$SOURCE_SHA\`."
+            echo
+            echo "Candidate source, when present, is intentionally public and may contaminate future model-synthesis evaluations."
+            echo "Held-out inputs, held-out oracles, executable oracle code, hidden tests, and reference solutions are excluded."
+          } >"$notes"
+          gh release create "$RELEASE_TAG" \
+            handoff/payload/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "ZLBench $RUN_ID" \
+            --notes-file "$notes" \
+            --latest=false
+
+      - name: Download and compare every published asset over HTTPS
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ needs.validate.outputs.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RELEASE_TAG="zlbench-${RUN_ID}"
+          release_json="$RUNNER_TEMP/published-zlbench-release.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" >"$release_json"
+          mapfile -t local_assets < <(find handoff/payload -maxdepth 1 -type f -print | sort)
+          [[ "$(jq '.assets | length' "$release_json")" -eq "${#local_assets[@]}" ]]
+          verify_dir="$RUNNER_TEMP/published-zlbench-assets"
+          mkdir -p "$verify_dir"
+          for local_path in "${local_assets[@]}"; do
+            asset_name="$(basename "$local_path")"
+            asset_url="$(
+              jq -er --arg name "$asset_name" \
+                '.assets[] | select(.name == $name) | .browser_download_url' \
+                "$release_json"
+            )"
+            curl --fail --location --retry 5 --retry-all-errors \
+              --silent --show-error \
+              "$asset_url" \
+              --output "$verify_dir/$asset_name"
+            cmp "$local_path" "$verify_dir/$asset_name"
+          done
+          (
+            cd "$verify_dir"
+            sha256sum -c SHA256SUMS
+          )
+
+      - name: Append signed Pages manifest after release verification
+        working-directory: index
+        env:
+          RUN_ID: ${{ needs.validate.outputs.run_id }}
+          SIGNING_KEY_ID: ${{ secrets.ZERGLANG_BENCHMARK_SIGNING_KEY_ID }}
+          SIGNING_PRIVATE_KEY: ${{ secrets.ZERGLANG_BENCHMARK_SIGNING_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_path="$RUNNER_TEMP/zlbench-index-signing-key.pem"
+          cleanup() {
+            rm -f "$key_path"
+          }
+          trap cleanup EXIT
+          umask 077
+          printf '%s\n' "$SIGNING_PRIVATE_KEY" >"$key_path"
+          git pull --ff-only origin main
+          manifest="../handoff/payload/zlbench-${RUN_ID}.manifest.json"
+          node scripts/benchmark-publication.mjs verify \
+            "$manifest" \
+            --keys site/benchmarks/keys.json \
+            >/dev/null
+          node scripts/benchmark-publication.mjs publish-pages \
+            "$manifest" \
+            --bundle ../handoff/incoming \
+            --key-id "$SIGNING_KEY_ID" \
+            --keys site/benchmarks/keys.json \
+            --private-key "$key_path" \
+            --site site \
+            >/dev/null
+          git add site/benchmarks
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Publish zlbench-${RUN_ID} evidence manifest"
+          git push origin HEAD:main
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: index/site
+
+  deploy-pages:
+    name: Deploy verified release and benchmark indexes
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

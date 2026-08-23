@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zerglang.dev/schemas/benchmark-public-results-1.json",
+  "title": "Privacy-preserving ZergLang conformance observations",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "dataset_id", "profile_identity", "public_observations", "non_public_aggregates"],
+  "properties": {
+    "schema": {"const": "zerglang.benchmark-public-results/1"},
+    "dataset_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "profile_identity": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "public_observations": {"type": "array", "items": {"$ref": "#/$defs/publicObservation"}},
+    "non_public_aggregates": {"type": "array", "items": {"$ref": "#/$defs/nonPublicAggregate"}}
+  },
+  "$defs": {
+    "counter": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "publicObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_id", "task_revision", "case_id", "executor", "fixture_maturity", "profile_status", "edition_status", "failure_kind", "diagnostic_code"],
+      "properties": {
+        "task_id": {"type": "string", "minLength": 1},
+        "task_revision": {"type": "integer", "minimum": 1},
+        "case_id": {"type": "string", "minLength": 1},
+        "executor": {"type": "string", "minLength": 1},
+        "fixture_maturity": {"enum": ["scaffold", "executable", "verified"]},
+        "profile_status": {"enum": ["pass", "fail", "skip", "infra-error"]},
+        "edition_status": {"enum": ["pass", "gap", "fail", "not-applicable"]},
+        "failure_kind": {"oneOf": [{"type": "null"}, {"enum": ["scaffold", "unsupported", "wrong-behavior", "engine-divergence", "timeout", "crash", "harness", "platform"]}]},
+        "diagnostic_code": {"oneOf": [{"type": "null"}, {"const": "non-normative-diagnostic"}, {"type": "string", "pattern": "^ZL-[A-Z0-9]+(?:-[A-Z0-9]+)*$"}]}
+      }
+    },
+    "nonPublicAggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_id", "task_revision", "executor", "case_count", "profile", "edition", "failures"],
+      "properties": {
+        "task_id": {"type": "string", "minLength": 1},
+        "task_revision": {"type": "integer", "minimum": 1},
+        "executor": {"type": "string", "minLength": 1},
+        "case_count": {"type": "integer", "minimum": 1},
+        "profile": {"$ref": "#/$defs/counter"},
+        "edition": {"$ref": "#/$defs/counter"},
+        "failures": {"$ref": "#/$defs/counter"}
+      }
+    }
+  }
+}

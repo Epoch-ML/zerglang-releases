@@ -106,3 +106,128 @@ GitHub Releases are treated as immutable. If publication stops after a Release
 is created but before the Pages manifest is committed, inspect the Release and
 its checksums before recovery; do not replace assets underneath an already
 published updater manifest.
+
+## Official benchmark evidence
+
+ZLBench publication is a second, isolated release channel in this repository.
+It does not reuse IDE tags, updater paths, environments, or signing keys. IDE
+updater URLs above remain unchanged.
+
+The source workflow creates a disclosure-safe bundle and uploads it as one
+immutable GitHub Actions artifact. A least-privilege GitHub App writes only a
+locator at `benchmark-requests/<run_id>.json`. The public workflow then:
+
+1. validates that exactly one content-derived locator was added;
+2. verifies the exact source workflow run, attempt, commit, artifact ID, name,
+   and GitHub artifact digest;
+3. downloads that artifact with `actions:read`, then revalidates its closed
+   schema, complete shard set, file inventory, sizes, SHA-256 digests, and
+   disclosure policy;
+4. packages the unchanged evidence deterministically and signs a release
+   binding with a dedicated Ed25519 benchmark key;
+5. publishes `zlbench-<run_id>` GitHub Release assets, downloads every asset
+   again over HTTPS, and compares every byte; and
+6. copies only digest-verified public JSON projections and the signed run
+   manifest to an immutable Pages run directory, updates the append-only index,
+   and changes the suite/lane `latest` pointer last.
+
+Only `status: complete` is admitted. A benchmark failure is valid evidence and
+does not make transport incomplete; `partial` means missing execution evidence
+and cannot become an official run.
+
+Public bundles use `zerglang.benchmark-public-report/1` and
+`zerglang.benchmark-public-results/1`. Raw `benchmark-report/2` and raw
+case-result JSONL are rejected because they can contain held-out case IDs and
+diagnostics. Raw performance reports are replaced by the public-case-only
+`zerglang.benchmark-public-performance/1` projection. Public cases may carry
+their public inputs and expected values.
+Held-out results are aggregate-only. Hidden tests, held-out inputs, held-out
+oracles, executable oracle code, and reference solutions must all be excluded.
+Candidate source may be included, but it is always accompanied by the exact
+contamination warning enforced by the validator.
+
+Synthesis publication requires the dedicated aggregate-safe
+`zerglang.benchmark-public-synthesis/1` projection. It exposes only normalized
+backend identity, aggregate outcome/readout data, and optional digest-bound
+public candidate references. Every candidate is inventoried and referenced
+exactly once with the canonical contamination warning. Raw synthesis reports,
+held-out diagnostics, transcripts, prompts, and evaluation material are not
+accepted as substitutes.
+
+The small public discovery surface is:
+
+- `/benchmarks/index.json` — append-only run entries;
+- `/benchmarks/runs/<run_id>/manifest.json` — immutable signed run manifests;
+- `/benchmarks/index.signature.json` — detached Ed25519 signature over the
+  canonical discovery index;
+- `/benchmarks/runs/<run_id>/artifacts/` — digest-bound public report, result,
+  performance, synthesis, catalog, and task JSON for dashboards;
+- `/benchmarks/latest/<suite>/<lane>.json` — mutable convenience pointers; and
+- `/benchmarks/keys.json` — trusted public benchmark signing keys.
+
+Candidate source, logs, schemas, and large evidence bundles remain GitHub
+Release assets. Pages never receives private test material, executable oracle
+code, or candidate source.
+
+### Schema and validator policy
+
+The JSON schemas under `schemas/` are the consumer contract. Public projection
+schemas are pinned copies of the corresponding source-repository schema
+versions; `report.schema.json`, `synthesis-report.schema.json`, and
+`task.schema.json` are present only to resolve shared definitions and are never
+admitted artifact roles.
+The release-envelope schemas add repository admission constraints. The Node 22
+validator in `scripts/benchmark-publication.mjs` is the fail-closed publication
+authority: it additionally enforces canonical content identity, cross-field
+bindings, sorted/unique values, exact bundle inventory, disclosure scanning,
+aggregate consistency, candidate-reference cardinality, and Ed25519 trust. A
+schema revision is immutable. Incompatible changes require a new schema name
+and validator path; an old version is never reinterpreted.
+
+Validate locally:
+
+```bash
+node --test scripts/*.test.mjs
+node scripts/benchmark-publication.mjs validate-delivery benchmark-requests/<run_id>.json
+node scripts/benchmark-publication.mjs validate-bundle /path/to/unpacked/public-bundle
+```
+
+`scripts/generate-benchmark-fixture.mjs OUTPUT_DIR` creates a deterministic,
+minimal signed public bundle, archive, public key set, and manifest for website
+ingestion tests. Its fixed RFC test-vector seed is test-only and is never
+trusted by production.
+
+### Benchmark credentials
+
+Use two separately scoped GitHub App installations for transport. In the source
+repository, protect a `benchmark-delivery` environment and store:
+
+- `ZERGLANG_BENCHMARK_DELIVERY_APP_ID`
+- `ZERGLANG_BENCHMARK_DELIVERY_APP_PRIVATE_KEY`
+
+That App needs only `Contents: write` on `Epoch-ML/zerglang-releases`; the
+source workflow uses its short-lived token only to add the content-addressed
+locator under `benchmark-requests/`.
+
+The release repository uses a different source-reader App with only
+`Actions: read` and `Metadata: read` on `Epoch-ML/zerg`. Store its credentials
+for this workflow as:
+
+- `ZERGLANG_BENCHMARK_PUBLISHER_APP_ID`
+- `ZERGLANG_BENCHMARK_PUBLISHER_APP_PRIVATE_KEY`
+
+Create a separate Ed25519 key for the protected `benchmark-publication`
+environment:
+
+```bash
+openssl genpkey -algorithm Ed25519 -out benchmark-private.pem
+openssl pkey -in benchmark-private.pem -pubout -out benchmark-public.pem
+```
+
+Commit only the public key as an `active` entry in
+`site/benchmarks/keys.json`. Store its matching private PEM in
+`ZERGLANG_BENCHMARK_SIGNING_PRIVATE_KEY` and its ID (for example,
+`zlbench-ed25519-2026-08`) in `ZERGLANG_BENCHMARK_SIGNING_KEY_ID`. The checked-in
+trust store is intentionally empty until that controlled bootstrap occurs, so
+publication fails closed. Never put the Tauri updater key in either benchmark
+secret.

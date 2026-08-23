@@ -1,0 +1,7 @@
+{
+  "algorithm": "Ed25519",
+  "index_sha256": "ac0a1f762e08b381ce2d78f8e9df0b237ea2bbeba2bb119ca6ca3c7e3777464b",
+  "key_id": "zlbench-ed25519-2026-08-primary",
+  "schema": "zerglang.benchmark-index-signature/1",
+  "value": "VY3maD93qROKN57HTy1uR9SZwtewxEL8q0HGNxUD/7eCI7V9Oj42tVuA/1jrHVfEEZTxr0TGjJPQbF6lgLLYAA=="
+}

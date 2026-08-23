@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zerglang.dev/schemas/benchmark-publication-delivery.schema.json",
+  "title": "ZergLang benchmark publication delivery locator",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "run_id", "source_repository", "source_sha", "workflow_run_id", "workflow_run_attempt", "artifact_id", "artifact_name", "artifact_digest", "requested_at"],
+  "properties": {
+    "schema": {"const": "zerglang.benchmark-publication-delivery/1"},
+    "run_id": {"type": "string", "pattern": "^run-[0-9a-f]{32}$"},
+    "source_repository": {"const": "Epoch-ML/zerg"},
+    "source_sha": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
+    "workflow_run_id": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+    "workflow_run_attempt": {"type": "integer", "minimum": 1, "maximum": 1000000},
+    "artifact_id": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+    "artifact_name": {"type": "string", "pattern": "^zlbench-publication-run-[0-9a-f]{32}$"},
+    "artifact_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "requested_at": {"type": "string", "format": "date-time"}
+  }
+}

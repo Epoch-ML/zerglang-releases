@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zerglang.dev/schemas/benchmark-public-report-1.json",
+  "title": "Privacy-preserving ZergLang conformance report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "metadata", "summary", "results_sha256"],
+  "properties": {
+    "schema": {"const": "zerglang.benchmark-public-report/1"},
+    "metadata": {"$ref": "report.schema.json#/$defs/metadata"},
+    "summary": {"$ref": "report.schema.json#/$defs/summary"},
+    "results_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
