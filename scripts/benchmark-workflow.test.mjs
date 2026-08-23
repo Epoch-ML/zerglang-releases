@@ -10,6 +10,10 @@ const ideWorkflow = await readFile(
   new URL("../.github/workflows/release.yml", import.meta.url),
   "utf8",
 );
+const pagesBootstrapWorkflow = await readFile(
+  new URL("../.github/workflows/pages-bootstrap.yml", import.meta.url),
+  "utf8",
+);
 
 test("benchmark publication is isolated from IDE tags and signing credentials", () => {
   assert.match(benchmarkWorkflow, /benchmark-requests\/\*\.json/);
@@ -48,10 +52,17 @@ test("publisher rejects replacement and verifies release bytes before Pages muta
 });
 
 test("IDE and benchmark Pages mutations share a non-canceling publication lock", () => {
-  for (const workflow of [ideWorkflow, benchmarkWorkflow]) {
+  for (const workflow of [ideWorkflow, benchmarkWorkflow, pagesBootstrapWorkflow]) {
     assert.match(workflow, /group: zerglang-publication/);
     assert.match(workflow, /cancel-in-progress: false/);
   }
+});
+
+test("Pages bootstrap is manual-only and deploys the reviewed site tree", () => {
+  assert.match(pagesBootstrapWorkflow, /workflow_dispatch:/);
+  assert.doesNotMatch(pagesBootstrapWorkflow, /\n\s+push:/);
+  assert.match(pagesBootstrapWorkflow, /path: site/);
+  assert.match(pagesBootstrapWorkflow, /actions\/deploy-pages@v5/);
 });
 
 test("bundle packaging is reproducible and does not mutate incoming evidence", () => {
