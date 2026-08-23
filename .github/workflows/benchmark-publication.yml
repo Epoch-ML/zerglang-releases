@@ -34,11 +34,11 @@ jobs:
       workflow_run_attempt: ${{ steps.request.outputs.workflow_run_attempt }}
       workflow_run_id: ${{ steps.request.outputs.workflow_run_id }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "22"
 
@@ -106,15 +106,15 @@ jobs:
       bundle_asset: ${{ steps.evidence.outputs.bundle_asset }}
       bundle_sha256: ${{ steps.evidence.outputs.bundle_sha256 }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "22"
 
       - id: source-token
         name: Mint short-lived read token for source Actions evidence
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         with:
           app-id: ${{ secrets.ZERGLANG_BENCHMARK_PUBLISHER_APP_ID }}
           private-key: ${{ secrets.ZERGLANG_BENCHMARK_PUBLISHER_APP_PRIVATE_KEY }}
@@ -184,7 +184,7 @@ jobs:
             "$artifact_json" >/dev/null
 
       - name: Download only the immutable artifact ID
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           artifact-ids: ${{ needs.validate.outputs.artifact_id }}
           github-token: ${{ steps.source-token.outputs.token }}
@@ -235,7 +235,7 @@ jobs:
           printf 'bundle_sha256=%s\n' "$bundle_sha256" >>"$GITHUB_OUTPUT"
 
       - name: Transfer only the revalidated public handoff
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: zlbench-verified-${{ needs.validate.outputs.run_id }}
           path: handoff/
@@ -254,16 +254,16 @@ jobs:
       pages: write
       id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           path: index
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "22"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: zlbench-verified-${{ needs.validate.outputs.run_id }}
           path: handoff
@@ -407,9 +407,9 @@ jobs:
           git commit -m "Publish zlbench-${RUN_ID} evidence manifest"
           git push origin HEAD:main
 
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: index/site
 
@@ -425,4 +425,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5

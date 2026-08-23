@@ -33,7 +33,10 @@ test("source artifact retrieval binds the exact successful workflow attempt", ()
   );
   assert.match(benchmarkWorkflow, /artifact-ids: \$\{\{ needs\.validate\.outputs\.artifact_id \}\}/);
   assert.match(benchmarkWorkflow, /artifact_digest/);
-  assert.match(benchmarkWorkflow, /actions\/create-github-app-token@v3/);
+  assert.match(
+    benchmarkWorkflow,
+    /actions\/create-github-app-token@[0-9a-f]{40} # v3/,
+  );
   assert.match(benchmarkWorkflow, /for attempt in \{1\.\.30\}/);
   assert.match(benchmarkWorkflow, /source workflow did not conclude successfully/);
 });
@@ -62,7 +65,20 @@ test("Pages bootstrap is manual-only and deploys the reviewed site tree", () => 
   assert.match(pagesBootstrapWorkflow, /workflow_dispatch:/);
   assert.doesNotMatch(pagesBootstrapWorkflow, /\n\s+push:/);
   assert.match(pagesBootstrapWorkflow, /path: site/);
-  assert.match(pagesBootstrapWorkflow, /actions\/deploy-pages@v5/);
+  assert.match(
+    pagesBootstrapWorkflow,
+    /actions\/deploy-pages@[0-9a-f]{40} # v5/,
+  );
+});
+
+test("every third-party workflow action is pinned to an immutable commit", () => {
+  for (const workflow of [ideWorkflow, benchmarkWorkflow, pagesBootstrapWorkflow]) {
+    const actions = [...workflow.matchAll(/uses:\s+[^\s@]+@([^\s#]+)/g)];
+    assert.ok(actions.length > 0, "workflow must use at least one reviewed action");
+    for (const action of actions) {
+      assert.match(action[1], /^[0-9a-f]{40}$/);
+    }
+  }
 });
 
 test("bundle packaging is reproducible and does not mutate incoming evidence", () => {
