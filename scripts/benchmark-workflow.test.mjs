@@ -116,5 +116,8 @@ test("every benchmark schema is closed and versioned independently", async () =>
     assert.equal(schema.properties.schema.const, schemaName);
     assert.equal(schema.additionalProperties, false);
     assert.ok(schema.required.length >= 3, `${filename} must require its identity and payload`);
+    if (filename === "benchmark-index.schema.json") {
+      assert.equal(schema.properties.runs.maxItems, 256);
+    }
   }
 });

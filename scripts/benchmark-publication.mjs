@@ -37,6 +37,7 @@ const MAX_MANIFEST_BYTES = 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_JSON_ARTIFACT_BYTES = 64 * 1024 * 1024;
 const MAX_ARTIFACTS = 512;
+const MAX_INDEX_RUNS = 256;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const SOURCE_SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const DECIMAL_ID_PATTERN = /^[1-9][0-9]*$/;
@@ -1761,6 +1762,9 @@ async function readExistingIndex(indexPath, signaturePath, trustedKeys) {
     if (document.schema !== INDEX_SCHEMA) fail(`benchmark index schema must equal ${INDEX_SCHEMA}`);
     requireTimestamp(document.updated_at, "benchmark index.updated_at");
     if (!Array.isArray(document.runs)) fail("benchmark index.runs must be an array");
+    if (document.runs.length > MAX_INDEX_RUNS) {
+      fail(`benchmark index.runs must contain at most ${MAX_INDEX_RUNS} runs`);
+    }
     const seen = new Set();
     for (const [index, entry] of document.runs.entries()) {
       requireFields(entry, ["bundle_asset", "bundle_sha256", "dataset_id", "lane", "manifest_path", "manifest_sha256", "profile_id", "profile_identity", "public_artifact_base", "published_at", "release_tag", "run_id", "source_sha", "status", "suite_id"], `benchmark index.runs[${index}]`);
@@ -1809,6 +1813,9 @@ export async function publishPagesManifest(
   const index = await readExistingIndex(indexPath, indexSignaturePath, trustedKeys);
   if (index.runs.some((item) => item.run_id === request.run_id)) {
     fail(`run is already published and cannot be overwritten: ${request.run_id}`);
+  }
+  if (index.runs.length >= MAX_INDEX_RUNS) {
+    fail(`benchmark index is full at ${MAX_INDEX_RUNS} runs; publish a paginated schema revision`);
   }
   try {
     await lstat(runRoot);

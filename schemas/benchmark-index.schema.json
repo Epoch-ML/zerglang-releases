@@ -10,6 +10,7 @@
     "updated_at": {"type": "string", "format": "date-time"},
     "runs": {
       "type": "array",
+      "maxItems": 256,
       "items": {
         "type": "object",
         "additionalProperties": false,
