@@ -409,9 +409,23 @@ jobs:
 
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
 
-      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+      - name: Archive verified Pages tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar \
+            --dereference --hard-dereference \
+            --directory index/site \
+            --exclude=.git --exclude=.github \
+            -cf "$RUNNER_TEMP/pages-artifact.tar" .
+
+      - name: Upload Pages artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          path: index/site
+          name: github-pages
+          path: ${{ runner.temp }}/pages-artifact.tar
+          retention-days: 1
+          if-no-files-found: error
 
   deploy-pages:
     name: Deploy verified release and benchmark indexes

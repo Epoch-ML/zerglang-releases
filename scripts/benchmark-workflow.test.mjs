@@ -64,7 +64,10 @@ test("IDE and benchmark Pages mutations share a non-canceling publication lock",
 test("Pages bootstrap is manual-only and deploys the reviewed site tree", () => {
   assert.match(pagesBootstrapWorkflow, /workflow_dispatch:/);
   assert.doesNotMatch(pagesBootstrapWorkflow, /\n\s+push:/);
-  assert.match(pagesBootstrapWorkflow, /path: site/);
+  assert.match(pagesBootstrapWorkflow, /--directory site/);
+  assert.doesNotMatch(pagesBootstrapWorkflow, /actions\/upload-pages-artifact/);
+  assert.match(pagesBootstrapWorkflow, /name: github-pages/);
+  assert.match(pagesBootstrapWorkflow, /pages-artifact\.tar/);
   assert.match(
     pagesBootstrapWorkflow,
     /actions\/deploy-pages@[0-9a-f]{40} # v5/,
