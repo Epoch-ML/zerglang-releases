@@ -776,6 +776,23 @@ async function collectRulesets(request, repository, response) {
   return rulesets;
 }
 
+async function collectWorkflows(request, repository, workflowPaths) {
+  const workflows = [];
+  for (const workflowPath of workflowPaths) {
+    const workflowFile = workflowPath.split("/").at(-1);
+    const workflow = await request({
+      repository,
+      path: `actions/workflows/${encodeURIComponent(workflowFile)}`,
+      allowNotFound: true,
+    });
+    if (workflow !== null) {
+      const record = requireObject(workflow, `workflow ${workflowPath}`);
+      workflows.push({ path: record.path, state: record.state });
+    }
+  }
+  return workflows;
+}
+
 export async function collectRepositoryState({
   request = requestGitHub,
   readTrustRoot = readFile,
@@ -831,10 +848,11 @@ export async function collectRepositoryState({
         : [],
     };
   }
-  const releaseWorkflows = await request({
-    repository: releaseRepository,
-    path: "actions/workflows",
-  });
+  const releaseWorkflows = await collectWorkflows(
+    request,
+    releaseRepository,
+    [RELEASE_WORKFLOW, RELEASE_POLICY_ANCHOR],
+  );
   const environmentResponse = await request({
     repository: releaseRepository,
     path: "environments",
@@ -902,10 +920,11 @@ export async function collectRepositoryState({
       `${check.context}:${check.app_id ?? "any"}`
     ).sort(),
   };
-  const sourceWorkflows = await request({
-    repository: sourceRepository,
-    path: "actions/workflows",
-  });
+  const sourceWorkflows = await collectWorkflows(
+    request,
+    sourceRepository,
+    [SOURCE_WORKFLOW, PAIRED_SOURCE_WORKFLOW, SOURCE_POLICY_ANCHOR],
+  );
   const sourceEnvironmentResponse = await request({
     repository: sourceRepository,
     path: "environments",
@@ -950,9 +969,7 @@ export async function collectRepositoryState({
       immutableReleases,
       pages,
       feedBranch,
-      workflows: Array.isArray(releaseWorkflows.workflows)
-        ? releaseWorkflows.workflows.map(({ path, state }) => ({ path, state }))
-        : [],
+      workflows: releaseWorkflows,
       environments,
       repositorySecrets: Array.isArray(repositorySecretsResponse.secrets)
         ? repositorySecretsResponse.secrets.map((secret) => secret.name).sort()
@@ -964,9 +981,7 @@ export async function collectRepositoryState({
       defaultBranch: sourceDefaultBranch,
       anchorDependencies: sourceAnchorDependencies,
       defaultBranchProtection: sourceDefaultBranchProtection,
-      workflows: Array.isArray(sourceWorkflows.workflows)
-        ? sourceWorkflows.workflows.map(({ path, state }) => ({ path, state }))
-        : [],
+      workflows: sourceWorkflows,
       environments: sourceEnvironments,
       repositorySecrets: Array.isArray(sourceRepositorySecretsResponse.secrets)
         ? sourceRepositorySecretsResponse.secrets.map((secret) => secret.name).sort()

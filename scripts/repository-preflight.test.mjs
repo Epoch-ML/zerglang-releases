@@ -1105,7 +1105,7 @@ test("collects settings through one injected read-only HTTP boundary", async () 
     ],
     [
       "Epoch-ML/zerglang-releases:actions/workflows/policy-anchor.yml",
-      { path: ".github/workflows/policy-anchor.yml", state: "active" },
+      null,
     ],
     [
       "Epoch-ML/zerglang-releases:environments",
@@ -1305,6 +1305,9 @@ test("collects settings through one injected read-only HTTP boundary", async () 
   ]);
   const request = async ({ repository, path, allowNotFound = false }) => {
     calls.push(`${repository}:${path}`);
+    if (path.startsWith("actions/workflows/")) {
+      assert.equal(allowNotFound, true);
+    }
     if (path === "actions/workflows") {
       return {
         total_count: 33,
@@ -1352,10 +1355,6 @@ test("collects settings through one injected read-only HTTP boundary", async () 
         {
           path: ".github/workflows/release.yml",
           state: "disabled_manually",
-        },
-        {
-          path: ".github/workflows/policy-anchor.yml",
-          state: "active",
         },
       ],
       environments: {
