@@ -350,7 +350,7 @@ test("requires exactly one matching verified read-only source checkout key", () 
   assert.deepEqual(errorCodes(unrelated), []);
 });
 
-test("rejects extra and duplicate release or source rulesets", () => {
+test("allows unrelated rulesets but rejects duplicate required rulesets", () => {
   const outcomes = [];
   for (const owner of ["release", "source"]) {
     const extra = healthyState();
@@ -369,11 +369,89 @@ test("rejects extra and duplicate release or source rulesets", () => {
     outcomes.push({ owner, variant: "duplicate", codes: errorCodes(duplicate) });
   }
   assert.deepEqual(outcomes, [
-    { owner: "release", variant: "extra", codes: ["ruleset-contract"] },
+    { owner: "release", variant: "extra", codes: [] },
     { owner: "release", variant: "duplicate", codes: ["ruleset-contract"] },
-    { owner: "source", variant: "extra", codes: ["source-ruleset-contract"] },
+    { owner: "source", variant: "extra", codes: [] },
     { owner: "source", variant: "duplicate", codes: ["source-ruleset-contract"] },
   ]);
+});
+
+test("preserves current legacy tag rules while requiring new ZergLang refs", () => {
+  const state = healthyState();
+  state.release.rulesets.find(
+    ({ name }) => name === "Release tag authority",
+  ).refs.push(
+    "refs/tags/zerglang-ide-preview-v*",
+    "refs/tags/zerglang-ide-v*",
+  );
+  for (const name of [
+    "Desktop release tag authority",
+    "Desktop release tag immutability",
+  ]) {
+    state.source.rulesets.find(({ name: candidate }) => candidate === name)
+      .refs.push(
+        "refs/tags/djzerg-preview-v*",
+        "refs/tags/djzerg-v*",
+        "refs/tags/fakeidan-preview-v*",
+        "refs/tags/fakeidan-v*",
+        "refs/tags/zergmeeting-preview-v*",
+        "refs/tags/zergmeeting-v*",
+      );
+  }
+  state.source.rulesets.push(
+    {
+      name: "ZergLang branch authority",
+      refs: ["refs/heads/zerglang"],
+      bypass: ["User:1042757"],
+      rules: ["creation", "update"],
+    },
+    {
+      name: "ZergLang branch history",
+      refs: ["refs/heads/zerglang"],
+      bypass: [],
+      rules: ["deletion", "non_fast_forward"],
+    },
+    {
+      name: "Reviewed ZergLang changes",
+      refs: ["refs/heads/zerglang"],
+      bypass: ["User:1042757"],
+      rules: [
+        "pull_request:rebase:1:last-push",
+        "required_linear_history",
+        "required_status_checks:ZergLang release policy:15368:strict",
+      ],
+    },
+    {
+      name: "ZTC release tag authority",
+      refs: ["refs/tags/ztc-v*"],
+      bypass: ["User:1042757"],
+      rules: ["creation"],
+    },
+    {
+      name: "ZTC release tag immutability",
+      refs: ["refs/tags/ztc-v*"],
+      bypass: [],
+      rules: ["deletion", "update"],
+    },
+  );
+
+  assert.deepEqual(errorCodes(state), []);
+});
+
+test("accepts stronger required rules and fewer bypasses", () => {
+  const state = healthyState();
+  for (const owner of ["release", "source"]) {
+    const authority = state[owner].rulesets.find(
+      ({ bypass }) => bypass.includes("User:1042757"),
+    );
+    authority.bypass = [];
+    authority.rules.push("required_signatures");
+  }
+  state.source.defaultBranchProtection.requiredStatusChecks.push(
+    "Protected-base Other product policy:15368",
+  );
+
+  assert.deepEqual(errorCodes(state), []);
 });
 
 test("requires protected-base anchors instead of head-controlled checks", () => {
@@ -732,15 +810,20 @@ test("enforces every environment, workflow, key, and ruleset identity", () => {
 
   for (const owner of ["release", "source"]) {
     for (const index of healthyState()[owner].rulesets.keys()) {
-      for (const field of ["refs", "bypass", "rules"]) {
+      for (const field of ["refs", "rules"]) {
         const state = healthyState();
-        state[owner].rulesets[index][field] =
-          state[owner].rulesets[index][field].length === 0 ? ["unexpected"] : [];
+        state[owner].rulesets[index][field] = [];
         assert.deepEqual(
           errorCodes(state),
           [owner === "release" ? "ruleset-contract" : "source-ruleset-contract"],
         );
       }
+      const unexpectedBypass = healthyState();
+      unexpectedBypass[owner].rulesets[index].bypass.push("Team:42");
+      assert.deepEqual(
+        errorCodes(unexpectedBypass),
+        [owner === "release" ? "ruleset-contract" : "source-ruleset-contract"],
+      );
     }
   }
 });
@@ -770,7 +853,7 @@ test("requires exact environment reviewers, self-review, and wait timers", () =>
   assert.deepEqual(errorCodes(sourceReviewer), ["source-environment-contract"]);
 });
 
-test("requires exact source and release tag authority and immutability rules", () => {
+test("requires every source and release tag authority and immutability ref", () => {
   for (const [owner, name, expectedCode] of [
     ["release", "Release tag authority", "ruleset-contract"],
     ["release", "Release tag immutability", "ruleset-contract"],
@@ -787,7 +870,7 @@ test("requires exact source and release tag authority and immutability rules", (
     extraPattern[owner].rulesets.find(
       (ruleset) => ruleset.name === name,
     ).refs.push("refs/tags/*");
-    assert.deepEqual(errorCodes(extraPattern), [expectedCode], name);
+    assert.deepEqual(errorCodes(extraPattern), [], name);
   }
 });
 
@@ -1025,6 +1108,10 @@ test("collects settings through one injected read-only HTTP boundary", async () 
       {
         environments: [{
           name: "zerglang-feed",
+          deployment_branch_policy: {
+            custom_branch_policies: false,
+            protected_branches: true,
+          },
           protection_rules: [
             { type: "branch_policy" },
             {
@@ -1037,6 +1124,12 @@ test("collects settings through one injected read-only HTTP boundary", async () 
             },
             { type: "wait_timer", wait_timer: 15 },
           ],
+        }, {
+          name: "benchmark-publication",
+          deployment_branch_policy: {
+            custom_branch_policies: false,
+            protected_branches: true,
+          },
         }],
       },
     ],
@@ -1046,7 +1139,7 @@ test("collects settings through one injected read-only HTTP boundary", async () 
     ],
     [
       "Epoch-ML/zerglang-releases:environments/zerglang-feed/deployment-branch-policies",
-      { branch_policies: [{ name: "main", type: "branch" }] },
+      null,
     ],
     [
       "Epoch-ML/zerglang-releases:actions/secrets",
@@ -1136,7 +1229,22 @@ test("collects settings through one injected read-only HTTP boundary", async () 
     ],
     [
       "Epoch-ML/zerg:environments",
-      { environments: [{ name: "zerglang-release-request" }] },
+      {
+        environments: [
+          { name: "zerglang-release-request" },
+          {
+            name: "zerglang-site-production",
+            deployment_branch_policy: null,
+          },
+          {
+            name: "benchmark-publication",
+            deployment_branch_policy: {
+              custom_branch_policies: false,
+              protected_branches: true,
+            },
+          },
+        ],
+      },
     ],
     [
       "Epoch-ML/zerg:environments/zerglang-release-request/secrets",
@@ -1174,8 +1282,14 @@ test("collects settings through one injected read-only HTTP boundary", async () 
       },
     ],
   ]);
-  const request = async ({ repository, path }) => {
+  const request = async ({ repository, path, allowNotFound = false }) => {
     calls.push(`${repository}:${path}`);
+    if (
+      repository === "Epoch-ML/zerglang-releases" &&
+      path === "environments/zerglang-feed/deployment-branch-policies"
+    ) {
+      assert.equal(allowNotFound, true);
+    }
     return structuredClone(responses.get(`${repository}:${path}`));
   };
 
@@ -1213,7 +1327,7 @@ test("collects settings through one injected read-only HTTP boundary", async () 
       environments: {
         "zerglang-feed": {
           secrets: ["A_SECRET", "Z_SECRET"],
-          refs: ["branch:main"],
+          refs: [],
           reviewers: ["Team:42", "User:1042757"],
           prevent_self_review: false,
           wait_timer: 15,

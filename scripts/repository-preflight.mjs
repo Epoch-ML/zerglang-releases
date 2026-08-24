@@ -264,6 +264,19 @@ function equalStrings(left, right) {
     actual.every((value, index) => value === expected[index]);
 }
 
+function includesAllStrings(values, required) {
+  if (
+    !Array.isArray(values) ||
+    values.some((value) => typeof value !== "string") ||
+    !Array.isArray(required) ||
+    required.some((value) => typeof value !== "string")
+  ) {
+    return false;
+  }
+  const available = new Set(values);
+  return required.every((value) => available.has(value));
+}
+
 function diagnostic(code, message) {
   return { code, message };
 }
@@ -276,9 +289,9 @@ function findWorkflow(workflows, path) {
 
 function rulesetMatches(actual, expected) {
   return actual !== undefined &&
-    equalStrings(actual.refs, expected.refs) &&
-    equalStrings(actual.bypass, expected.bypass) &&
-    equalStrings(actual.rules, expected.rules);
+    includesAllStrings(actual.refs, expected.refs) &&
+    includesAllStrings(expected.bypass, actual.bypass) &&
+    includesAllStrings(actual.rules, expected.rules);
 }
 
 function environmentMatches(actual, expected) {
@@ -325,7 +338,7 @@ function sourceDefaultBranchProtectionMatches(protection) {
       EXPECTED_SOURCE_DEFAULT_BRANCH_PROTECTION.requireLinearHistory &&
     protection.strictStatusChecks ===
       EXPECTED_SOURCE_DEFAULT_BRANCH_PROTECTION.strictStatusChecks &&
-    equalStrings(
+    includesAllStrings(
       protection.requiredStatusChecks,
       EXPECTED_SOURCE_DEFAULT_BRANCH_PROTECTION.requiredStatusChecks,
     );
@@ -553,20 +566,11 @@ export function auditRepositoryState(state, { phase } = {}) {
   }
 
   const rulesets = Array.isArray(release.rulesets) ? release.rulesets : [];
-  const expectedRulesetNames = new Set(EXPECTED_RULESETS.map(({ name }) => name));
-  const actualRulesetNames = rulesets.map(({ name }) => name);
-  if (
-    actualRulesetNames.some((name) => !expectedRulesetNames.has(name)) ||
-    new Set(actualRulesetNames).size !== actualRulesetNames.length
-  ) {
-    errors.push(diagnostic(
-      "ruleset-contract",
-      "the release repository must contain exactly the reviewed rulesets",
-    ));
-  }
   for (const expected of EXPECTED_RULESETS) {
-    const actual = rulesets.find((ruleset) => ruleset.name === expected.name);
-    if (!rulesetMatches(actual, expected)) {
+    const matches = rulesets.filter(
+      (ruleset) => ruleset.name === expected.name,
+    );
+    if (matches.length !== 1 || !rulesetMatches(matches[0], expected)) {
       errors.push(diagnostic(
         "ruleset-contract",
         `${expected.name} differs from the cutover contract`,
@@ -574,24 +578,11 @@ export function auditRepositoryState(state, { phase } = {}) {
     }
   }
   const sourceRulesets = Array.isArray(source.rulesets) ? source.rulesets : [];
-  const expectedSourceRulesetNames = new Set(
-    EXPECTED_SOURCE_RULESETS.map(({ name }) => name),
-  );
-  const actualSourceRulesetNames = sourceRulesets.map(({ name }) => name);
-  if (
-    actualSourceRulesetNames.some(
-      (name) => !expectedSourceRulesetNames.has(name),
-    ) ||
-    new Set(actualSourceRulesetNames).size !== actualSourceRulesetNames.length
-  ) {
-    errors.push(diagnostic(
-      "source-ruleset-contract",
-      "the source repository must contain exactly the reviewed rulesets",
-    ));
-  }
   for (const expected of EXPECTED_SOURCE_RULESETS) {
-    const actual = sourceRulesets.find((ruleset) => ruleset.name === expected.name);
-    if (!rulesetMatches(actual, expected)) {
+    const matches = sourceRulesets.filter(
+      (ruleset) => ruleset.name === expected.name,
+    );
+    if (matches.length !== 1 || !rulesetMatches(matches[0], expected)) {
       errors.push(diagnostic(
         "source-ruleset-contract",
         `${expected.name} differs from the cutover contract`,
@@ -695,10 +686,25 @@ export async function requestGitHub({
   return response.json();
 }
 
-async function collectEnvironments(request, repository, response) {
+async function collectEnvironments(
+  request,
+  repository,
+  response,
+  expectedNames,
+) {
   const environments = {};
+  const expected = new Set(expectedNames);
   const records = Array.isArray(response.environments) ? response.environments : [];
-  for (const record of records.sort((left, right) => left.name.localeCompare(right.name))) {
+  const relevantRecords = records.filter(
+    (record) =>
+      record !== null &&
+      typeof record === "object" &&
+      typeof record.name === "string" &&
+      expected.has(record.name),
+  );
+  for (const record of relevantRecords.sort(
+    (left, right) => left.name.localeCompare(right.name),
+  )) {
     const protectionRules = Array.isArray(record.protection_rules)
       ? record.protection_rules
       : [];
@@ -738,12 +744,13 @@ async function collectEnvironments(request, repository, response) {
     const policies = await request({
       repository,
       path: `environments/${encodeURIComponent(record.name)}/deployment-branch-policies`,
+      allowNotFound: true,
     });
     environments[record.name] = {
       secrets: Array.isArray(secrets.secrets)
         ? secrets.secrets.map((secret) => secret.name).sort()
         : [],
-      refs: Array.isArray(policies.branch_policies)
+      refs: Array.isArray(policies?.branch_policies)
         ? policies.branch_policies.map((policy) =>
           `${policy.type}:${policy.name}`
         ).sort()
@@ -836,6 +843,7 @@ export async function collectRepositoryState({
     request,
     releaseRepository,
     environmentResponse,
+    Object.keys(EXPECTED_ENVIRONMENTS),
   );
   const repositorySecretsResponse = await request({
     repository: releaseRepository,
@@ -906,6 +914,7 @@ export async function collectRepositoryState({
     request,
     sourceRepository,
     sourceEnvironmentResponse,
+    ["zerglang-release-request"],
   );
   const sourceTrustVariablesResponse = await request({
     repository: sourceRepository,
