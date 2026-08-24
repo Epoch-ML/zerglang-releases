@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 const RELEASE_REPOSITORY = "Epoch-ML/zerglang-releases";
@@ -31,10 +33,16 @@ const EXPECTED_SOURCE_DEFAULT_BRANCH_PROTECTION = Object.freeze({
 });
 const CANONICAL_PAGES_URL = "https://epoch-ml.github.io/zerglang-releases/";
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const COHORT_TRUST_ROOT = new URL(
+  "../keys/zerglang-release-signing-keys.json",
+  import.meta.url,
+);
 
 const EXPECTED_ENVIRONMENTS = Object.freeze({
   preview: Object.freeze({
     secrets: Object.freeze([
+      "ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY",
       "ZERGLANG_TAURI_SIGNING_PRIVATE_KEY",
       "ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
     ]),
@@ -80,6 +88,7 @@ const EXPECTED_ENVIRONMENTS = Object.freeze({
   }),
   "zerglang-updater-stable": Object.freeze({
     secrets: Object.freeze([
+      "ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY",
       "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY",
       "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
     ]),
@@ -135,8 +144,8 @@ const EXPECTED_RULESETS = Object.freeze([
   Object.freeze({
     name: "Release tag authority",
     refs: Object.freeze([
-      "refs/tags/zerglang-ide-preview-v*",
-      "refs/tags/zerglang-ide-v*",
+      "refs/tags/zerglang-preview-v*",
+      "refs/tags/zerglang-v*",
     ]),
     bypass: Object.freeze(["User:1042757"]),
     rules: Object.freeze(["creation"]),
@@ -146,6 +155,8 @@ const EXPECTED_RULESETS = Object.freeze([
     refs: Object.freeze([
       "refs/tags/zerglang-ide-preview-v*",
       "refs/tags/zerglang-ide-v*",
+      "refs/tags/zerglang-preview-v*",
+      "refs/tags/zerglang-v*",
     ]),
     bypass: Object.freeze([]),
     rules: Object.freeze(["deletion", "update"]),
@@ -185,8 +196,8 @@ const EXPECTED_SOURCE_RULESETS = Object.freeze([
       "refs/tags/zde-v*",
       "refs/tags/zergchat-preview-v*",
       "refs/tags/zergchat-v*",
-      "refs/tags/zerglang-ide-preview-v*",
-      "refs/tags/zerglang-ide-v*",
+      "refs/tags/zerglang-preview-v*",
+      "refs/tags/zerglang-v*",
       "refs/tags/zterm-preview-v*",
       "refs/tags/zterm-v*",
     ]),
@@ -204,6 +215,8 @@ const EXPECTED_SOURCE_RULESETS = Object.freeze([
       "refs/tags/zergchat-v*",
       "refs/tags/zerglang-ide-preview-v*",
       "refs/tags/zerglang-ide-v*",
+      "refs/tags/zerglang-preview-v*",
+      "refs/tags/zerglang-v*",
       "refs/tags/zterm-preview-v*",
       "refs/tags/zterm-v*",
     ]),
@@ -215,8 +228,8 @@ const EXPECTED_SOURCE_RULESETS = Object.freeze([
 const EXPECTED_SOURCE_ENVIRONMENT = Object.freeze({
   secrets: Object.freeze([]),
   refs: Object.freeze([
-    "tag:zerglang-ide-preview-v*",
-    "tag:zerglang-ide-v*",
+    "tag:zerglang-preview-v*",
+    "tag:zerglang-v*",
   ]),
   reviewers: Object.freeze([]),
   prevent_self_review: null,
@@ -511,6 +524,18 @@ export function auditRepositoryState(state, { phase } = {}) {
       "zerglang-release-request must be secret-free and tag-scoped",
     ));
   }
+  const cohortTrustRootSha256 = release.cohortTrustRootSha256;
+  if (
+    typeof cohortTrustRootSha256 !== "string" ||
+    !SHA256_PATTERN.test(cohortTrustRootSha256) ||
+    sourceRequestEnvironment?.variables?.ZERGLANG_UPDATE_TRUST_ROOT_SHA256 !==
+      cohortTrustRootSha256
+  ) {
+    errors.push(diagnostic(
+      "cohort-trust-pin",
+      "the source release environment must pin the exact raw cohort trust-store digest",
+    ));
+  }
   if (
     Array.isArray(source.repositorySecrets) &&
     source.repositorySecrets.includes("ZERGLANG_RELEASES_DEPLOY_KEY")
@@ -746,11 +771,22 @@ async function collectRulesets(request, repository, response) {
 
 export async function collectRepositoryState({
   request = requestGitHub,
+  readTrustRoot = readFile,
   releaseRepository = RELEASE_REPOSITORY,
   sourceRepository = SOURCE_REPOSITORY,
 } = {}) {
   if (typeof request !== "function") {
     throw new RepositoryPreflightError("request must be a function");
+  }
+  if (typeof readTrustRoot !== "function") {
+    throw new RepositoryPreflightError("readTrustRoot must be a function");
+  }
+  let cohortTrustRootSha256 = null;
+  try {
+    const trustBytes = await readTrustRoot(COHORT_TRUST_ROOT);
+    cohortTrustRootSha256 = createHash("sha256").update(trustBytes).digest("hex");
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
   }
   const immutableReleases = await request({
     repository: releaseRepository,
@@ -871,6 +907,19 @@ export async function collectRepositoryState({
     sourceRepository,
     sourceEnvironmentResponse,
   );
+  const sourceTrustVariablesResponse = await request({
+    repository: sourceRepository,
+    path: "environments/zerglang-release-request/variables",
+  });
+  const sourceTrustVariables = Array.isArray(sourceTrustVariablesResponse.variables)
+    ? Object.fromEntries(sourceTrustVariablesResponse.variables.map(({ name, value }) => [
+      name,
+      value,
+    ]))
+    : {};
+  if (sourceEnvironments["zerglang-release-request"] !== undefined) {
+    sourceEnvironments["zerglang-release-request"].variables = sourceTrustVariables;
+  }
   const sourceRepositorySecretsResponse = await request({
     repository: sourceRepository,
     path: "actions/secrets",
@@ -888,6 +937,7 @@ export async function collectRepositoryState({
 
   return {
     release: {
+      cohortTrustRootSha256,
       immutableReleases,
       pages,
       feedBranch,

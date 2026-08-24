@@ -11,6 +11,7 @@ import {
 const RELEASE_ENVIRONMENTS = {
   preview: {
     secrets: [
+      "ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY",
       "ZERGLANG_TAURI_SIGNING_PRIVATE_KEY",
       "ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
     ],
@@ -53,6 +54,7 @@ const RELEASE_ENVIRONMENTS = {
   },
   "zerglang-updater-stable": {
     secrets: [
+      "ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY",
       "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY",
       "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
     ],
@@ -66,6 +68,9 @@ const RELEASE_ENVIRONMENTS = {
     prevent_self_review: null, wait_timer: null,
   },
 };
+const COHORT_TRUST_SHA256 = "c".repeat(64);
+const COLLECTED_TRUST_SHA256 =
+  "1598c9c7f1402662a68c04374d29308434e8af63f64aeb08b9d8987fe55ec2cb";
 
 const SOURCE_ANCHOR_DEPENDENCIES = [
   ".github/workflows/zerglang-ide-release.yml",
@@ -109,6 +114,7 @@ const SHARED_SOURCE_BRANCH_RULESETS = [
 function healthyState(workflowState = "disabled_manually") {
   return {
     release: {
+      cohortTrustRootSha256: COHORT_TRUST_SHA256,
       immutableReleases: { enabled: true },
       pages: {
         https_enforced: true,
@@ -190,8 +196,8 @@ function healthyState(workflowState = "disabled_manually") {
         {
           name: "Release tag authority",
           refs: [
-            "refs/tags/zerglang-ide-preview-v*",
-            "refs/tags/zerglang-ide-v*",
+            "refs/tags/zerglang-preview-v*",
+            "refs/tags/zerglang-v*",
           ],
           bypass: ["User:1042757"],
           rules: ["creation"],
@@ -201,6 +207,8 @@ function healthyState(workflowState = "disabled_manually") {
           refs: [
             "refs/tags/zerglang-ide-preview-v*",
             "refs/tags/zerglang-ide-v*",
+            "refs/tags/zerglang-preview-v*",
+            "refs/tags/zerglang-v*",
           ],
           bypass: [],
           rules: ["deletion", "update"],
@@ -244,9 +252,12 @@ function healthyState(workflowState = "disabled_manually") {
       environments: {
         "zerglang-release-request": {
           secrets: [],
+          variables: {
+            ZERGLANG_UPDATE_TRUST_ROOT_SHA256: COHORT_TRUST_SHA256,
+          },
           refs: [
-            "tag:zerglang-ide-preview-v*",
-            "tag:zerglang-ide-v*",
+            "tag:zerglang-preview-v*",
+            "tag:zerglang-v*",
           ],
           reviewers: [],
           prevent_self_review: null,
@@ -265,8 +276,8 @@ function healthyState(workflowState = "disabled_manually") {
             "refs/tags/zde-v*",
             "refs/tags/zergchat-preview-v*",
             "refs/tags/zergchat-v*",
-            "refs/tags/zerglang-ide-preview-v*",
-            "refs/tags/zerglang-ide-v*",
+            "refs/tags/zerglang-preview-v*",
+            "refs/tags/zerglang-v*",
             "refs/tags/zterm-preview-v*",
             "refs/tags/zterm-v*",
           ],
@@ -284,6 +295,8 @@ function healthyState(workflowState = "disabled_manually") {
             "refs/tags/zergchat-v*",
             "refs/tags/zerglang-ide-preview-v*",
             "refs/tags/zerglang-ide-v*",
+            "refs/tags/zerglang-preview-v*",
+            "refs/tags/zerglang-v*",
             "refs/tags/zterm-preview-v*",
             "refs/tags/zterm-v*",
           ],
@@ -624,6 +637,23 @@ test("keeps source request handoff free of write credentials", () => {
     "branch:zerglang",
   ];
   assert.deepEqual(errorCodes(wrongRefs), ["source-environment-contract"]);
+});
+
+test("requires the source release environment to pin the exact raw cohort trust bytes", () => {
+  for (const mutate of [
+    (state) => { state.release.cohortTrustRootSha256 = null; },
+    (state) => {
+      state.source.environments["zerglang-release-request"].variables = {};
+    },
+    (state) => {
+      state.source.environments["zerglang-release-request"].variables
+        .ZERGLANG_UPDATE_TRUST_ROOT_SHA256 = "d".repeat(64);
+    },
+  ]) {
+    const state = healthyState();
+    mutate(state);
+    assert.deepEqual(errorCodes(state), ["cohort-trust-pin"]);
+  }
 });
 
 test("requires every canonical Pages property independently", () => {
@@ -1116,9 +1146,18 @@ test("collects settings through one injected read-only HTTP boundary", async () 
       "Epoch-ML/zerg:environments/zerglang-release-request/deployment-branch-policies",
       {
         branch_policies: [
-          { name: "zerglang-ide-preview-v*", type: "tag" },
-          { name: "zerglang-ide-v*", type: "tag" },
+          { name: "zerglang-preview-v*", type: "tag" },
+          { name: "zerglang-v*", type: "tag" },
         ],
+      },
+    ],
+    [
+      "Epoch-ML/zerg:environments/zerglang-release-request/variables",
+      {
+        variables: [{
+          name: "ZERGLANG_UPDATE_TRUST_ROOT_SHA256",
+          value: COLLECTED_TRUST_SHA256,
+        }],
       },
     ],
     ["Epoch-ML/zerg:actions/secrets", { secrets: [] }],
@@ -1140,9 +1179,13 @@ test("collects settings through one injected read-only HTTP boundary", async () 
     return structuredClone(responses.get(`${repository}:${path}`));
   };
 
-  const state = await collectRepositoryState({ request });
+  const state = await collectRepositoryState({
+    request,
+    readTrustRoot: async () => Buffer.from("trust bytes"),
+  });
   assert.deepEqual(state, {
     release: {
+      cohortTrustRootSha256: COLLECTED_TRUST_SHA256,
       immutableReleases: { enabled: true },
       pages: {
         https_enforced: true,
@@ -1213,9 +1256,12 @@ test("collects settings through one injected read-only HTTP boundary", async () 
       environments: {
         "zerglang-release-request": {
           secrets: [],
+          variables: {
+            ZERGLANG_UPDATE_TRUST_ROOT_SHA256: COLLECTED_TRUST_SHA256,
+          },
           refs: [
-            "tag:zerglang-ide-preview-v*",
-            "tag:zerglang-ide-v*",
+            "tag:zerglang-preview-v*",
+            "tag:zerglang-v*",
           ],
           reviewers: [],
           prevent_self_review: null,

@@ -202,11 +202,15 @@ function addDiagnostic(diagnostics, code, job, step, message) {
   diagnostics.push({ code, job, step, message });
 }
 
-function isUpdaterSecret(name) {
+function isTauriUpdaterSecret(name) {
   return name === "ZERGLANG_TAURI_SIGNING_PRIVATE_KEY" ||
     name === "ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ||
     name === "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY" ||
     name === "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD";
+}
+
+function isUpdaterSecret(name) {
+  return isTauriUpdaterSecret(name) || name === "ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY";
 }
 
 function isAppleSecret(name) {
@@ -223,13 +227,29 @@ const APPLE_ENVIRONMENT =
 const UPDATER_JOB_POLICY = Object.freeze({
   sign_updater_preview: Object.freeze({
     environment: "preview",
+    kind: "tauri",
     privateKey: "ZERGLANG_TAURI_SIGNING_PRIVATE_KEY",
     password: "ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
+    tauriStep: "Sign only the preview updater archive",
+  }),
+  sign_cohort_preview: Object.freeze({
+    environment: "preview",
+    kind: "cohort",
+    cohortKey: "ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY",
+    cohortStep: "Sign only the preview cohort",
   }),
   sign_updater_stable: Object.freeze({
     environment: "zerglang-updater-stable",
+    kind: "tauri",
     privateKey: "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY",
     password: "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
+    tauriStep: "Sign only the stable updater archive",
+  }),
+  sign_cohort_stable: Object.freeze({
+    environment: "zerglang-updater-stable",
+    kind: "cohort",
+    cohortKey: "ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY",
+    cohortStep: "Sign only the stable cohort",
   }),
 });
 
@@ -250,13 +270,21 @@ const JOB_CONTRACTS = Object.freeze({
       '\\"$EXPECTED_REF:$EXPECTED_REF\\"',
       'git -C source-git archive \\"$ZERGLANG_SOURCE_SHA\\"',
       "--component clippy,rustfmt",
+      "ZLM_RUST_TOOLCHAIN",
+      "1.77.0",
       "createUpdaterArtifacts = false",
+      "scripts/toolchain-package.mjs refresh",
+      "zerglang-release-signing-keys.json",
       "zerglang-unsigned-source-stage",
     ]),
   }),
   apple_sign: Object.freeze({
     needs: Object.freeze(["build", "validate"]),
-    tokens: Object.freeze(["zerglang-platform-signed"]),
+    tokens: Object.freeze([
+      "scripts/sign-macos-toolchain.sh",
+      "ZergLang-toolchain-notarization.zip",
+      "zerglang-platform-signed",
+    ]),
   }),
   signed_smoke: Object.freeze({
     needs: Object.freeze(["apple_sign", "validate"]),
@@ -267,18 +295,72 @@ const JOB_CONTRACTS = Object.freeze({
       "run --tier=interpreter",
       "run --tier=jit",
       "build --emit=object",
+      "scripts/toolchain-package.mjs extract",
+      "bin/zlm",
+      "hdiutil attach",
+      "doctor --json",
+      "harness instructions --json",
+      "zlm-embed.mjs",
     ]),
   }),
   sign_updater_preview: Object.freeze({
     needs: Object.freeze(["signed_smoke", "validate"]),
-    tokens: Object.freeze(["zerglang-release-payload"]),
+    tokens: Object.freeze([
+      "tauri signer sign",
+      "zerglang-preview-updater-signature",
+    ]),
+  }),
+  sign_cohort_preview: Object.freeze({
+    needs: Object.freeze(["signed_smoke", "validate"]),
+    tokens: Object.freeze([
+      "scripts/cohort-payload.mjs sign",
+      "release-cohort.signature.json",
+      "zerglang-preview-cohort-signature",
+    ]),
+  }),
+  collect_preview: Object.freeze({
+    needs: Object.freeze([
+      "sign_cohort_preview",
+      "sign_updater_preview",
+      "validate",
+    ]),
+    tokens: Object.freeze([
+      "scripts/cohort-payload.mjs prepare",
+      "cmp --silent",
+      "scripts/release-payload.mjs",
+      "zerglang-release-payload-preview",
+    ]),
   }),
   sign_updater_stable: Object.freeze({
     needs: Object.freeze(["signed_smoke", "validate"]),
-    tokens: Object.freeze(["zerglang-release-payload"]),
+    tokens: Object.freeze([
+      "tauri signer sign",
+      "zerglang-stable-updater-signature",
+    ]),
+  }),
+  sign_cohort_stable: Object.freeze({
+    needs: Object.freeze(["signed_smoke", "validate"]),
+    tokens: Object.freeze([
+      "scripts/cohort-payload.mjs sign",
+      "release-cohort.signature.json",
+      "zerglang-stable-cohort-signature",
+    ]),
+  }),
+  collect_stable: Object.freeze({
+    needs: Object.freeze([
+      "sign_cohort_stable",
+      "sign_updater_stable",
+      "validate",
+    ]),
+    tokens: Object.freeze([
+      "scripts/cohort-payload.mjs prepare",
+      "cmp --silent",
+      "scripts/release-payload.mjs",
+      "zerglang-release-payload-stable",
+    ]),
   }),
   sign_updater: Object.freeze({
-    needs: Object.freeze(["sign_updater_preview", "sign_updater_stable"]),
+    needs: Object.freeze(["collect_preview", "collect_stable"]),
     tokens: Object.freeze([]),
   }),
   publish: Object.freeze({
@@ -290,6 +372,8 @@ const JOB_CONTRACTS = Object.freeze({
       ".immutable",
       "zerglang-canonical-release",
       "latest.json",
+      "release-cohort.json",
+      "zerglang-toolchain-",
     ]),
   }),
   feed: Object.freeze({
@@ -298,6 +382,8 @@ const JOB_CONTRACTS = Object.freeze({
       "release-data",
       "policy/scripts/feed-promotion.mjs",
       "zerglang-canonical-release",
+      "zerglang-release-signing-keys.json",
+      "toolchains/v1",
       "actions/upload-pages-artifact",
     ]),
   }),
@@ -310,6 +396,8 @@ const JOB_CONTRACTS = Object.freeze({
     tokens: Object.freeze([
       "https://epoch-ml.github.io/zerglang-releases",
       "latest.json",
+      "latest.signature.json",
+      "toolchains/v1/keys.json",
     ]),
   }),
 });
@@ -350,6 +438,7 @@ const JOB_BOUNDARIES = Object.freeze({
     environment: "zerglang-source-read",
     actions: Object.freeze([
       action(CHECKOUT_ACTION, {
+        "fetch-depth": 0,
         path: "release-repository",
         "persist-credentials": false,
       }),
@@ -357,7 +446,8 @@ const JOB_BOUNDARIES = Object.freeze({
       action(SETUP_NODE_ACTION, {
         "node-version": "22.23.2",
         cache: "npm",
-        "cache-dependency-path": "source/zerglang/ide/package-lock.json",
+        "cache-dependency-path":
+          "source/zerglang/ide/package-lock.json\nsource/ztc/package-lock.json\n",
       }),
       action(UPLOAD_ACTION, {
         name: "zerglang-unsigned-source-stage",
@@ -418,10 +508,59 @@ const JOB_BOUNDARIES = Object.freeze({
       action(SETUP_NODE_ACTION, { "node-version": "22.23.2", cache: "npm" }),
       action(DOWNLOAD_ACTION, {
         name: "zerglang-platform-signed",
-        path: "release-input",
+        path: "signing-input",
       }),
       action(UPLOAD_ACTION, {
-        name: "zerglang-release-payload",
+        name: "zerglang-preview-updater-signature",
+        path: "signing-input/ZergLang.app.tar.gz.sig",
+        "if-no-files-found": "error",
+        "retention-days": 1,
+        "compression-level": 0,
+      }),
+    ]),
+  }),
+  sign_cohort_preview: Object.freeze({
+    runner: "ubuntu-24.04",
+    permissions: READ_PERMISSION,
+    environment: "preview",
+    actions: Object.freeze([
+      action(CHECKOUT_ACTION, { "persist-credentials": false }),
+      action(SETUP_NODE_ACTION, { "node-version": "22.23.2" }),
+      action(DOWNLOAD_ACTION, {
+        name: "zerglang-platform-signed",
+        path: "signing-input",
+      }),
+      action(UPLOAD_ACTION, {
+        name: "zerglang-preview-cohort-signature",
+        path:
+          "signing-input/release-cohort.json\nsigning-input/release-cohort.signature.json\n",
+        "if-no-files-found": "error",
+        "retention-days": 1,
+        "compression-level": 0,
+      }),
+    ]),
+  }),
+  collect_preview: Object.freeze({
+    runner: "ubuntu-24.04",
+    permissions: READ_PERMISSION,
+    environment: null,
+    actions: Object.freeze([
+      action(CHECKOUT_ACTION, { "persist-credentials": false }),
+      action(SETUP_NODE_ACTION, { "node-version": "22.23.2", cache: "npm" }),
+      action(DOWNLOAD_ACTION, {
+        name: "zerglang-platform-signed",
+        path: "release-input",
+      }),
+      action(DOWNLOAD_ACTION, {
+        name: "zerglang-preview-updater-signature",
+        path: "detached-updater",
+      }),
+      action(DOWNLOAD_ACTION, {
+        name: "zerglang-preview-cohort-signature",
+        path: "detached-cohort",
+      }),
+      action(UPLOAD_ACTION, {
+        name: "zerglang-release-payload-preview",
         path: "release/*",
         "if-no-files-found": "error",
         "retention-days": 7,
@@ -438,10 +577,59 @@ const JOB_BOUNDARIES = Object.freeze({
       action(SETUP_NODE_ACTION, { "node-version": "22.23.2", cache: "npm" }),
       action(DOWNLOAD_ACTION, {
         name: "zerglang-platform-signed",
-        path: "release-input",
+        path: "signing-input",
       }),
       action(UPLOAD_ACTION, {
-        name: "zerglang-release-payload",
+        name: "zerglang-stable-updater-signature",
+        path: "signing-input/ZergLang.app.tar.gz.sig",
+        "if-no-files-found": "error",
+        "retention-days": 1,
+        "compression-level": 0,
+      }),
+    ]),
+  }),
+  sign_cohort_stable: Object.freeze({
+    runner: "ubuntu-24.04",
+    permissions: READ_PERMISSION,
+    environment: "zerglang-updater-stable",
+    actions: Object.freeze([
+      action(CHECKOUT_ACTION, { "persist-credentials": false }),
+      action(SETUP_NODE_ACTION, { "node-version": "22.23.2" }),
+      action(DOWNLOAD_ACTION, {
+        name: "zerglang-platform-signed",
+        path: "signing-input",
+      }),
+      action(UPLOAD_ACTION, {
+        name: "zerglang-stable-cohort-signature",
+        path:
+          "signing-input/release-cohort.json\nsigning-input/release-cohort.signature.json\n",
+        "if-no-files-found": "error",
+        "retention-days": 1,
+        "compression-level": 0,
+      }),
+    ]),
+  }),
+  collect_stable: Object.freeze({
+    runner: "ubuntu-24.04",
+    permissions: READ_PERMISSION,
+    environment: null,
+    actions: Object.freeze([
+      action(CHECKOUT_ACTION, { "persist-credentials": false }),
+      action(SETUP_NODE_ACTION, { "node-version": "22.23.2", cache: "npm" }),
+      action(DOWNLOAD_ACTION, {
+        name: "zerglang-platform-signed",
+        path: "release-input",
+      }),
+      action(DOWNLOAD_ACTION, {
+        name: "zerglang-stable-updater-signature",
+        path: "detached-updater",
+      }),
+      action(DOWNLOAD_ACTION, {
+        name: "zerglang-stable-cohort-signature",
+        path: "detached-cohort",
+      }),
+      action(UPLOAD_ACTION, {
+        name: "zerglang-release-payload-stable",
         path: "release/*",
         "if-no-files-found": "error",
         "retention-days": 7,
@@ -470,7 +658,10 @@ const JOB_BOUNDARIES = Object.freeze({
         cache: "npm",
         "cache-dependency-path": "release-repository/package-lock.json",
       }),
-      action(DOWNLOAD_ACTION, { name: "zerglang-release-payload", path: "release" }),
+      action(DOWNLOAD_ACTION, {
+        name: "zerglang-release-payload-${{ needs.validate.outputs.channel }}",
+        path: "release",
+      }),
       action(UPLOAD_ACTION, {
         name: "zerglang-canonical-release",
         path: "${{ runner.temp }}/zerglang-canonical-release/*",
@@ -518,6 +709,10 @@ const JOB_BOUNDARIES = Object.freeze({
     permissions: READ_PERMISSION,
     environment: null,
     actions: Object.freeze([
+      action(CHECKOUT_ACTION, {
+        path: "policy",
+        "persist-credentials": false,
+      }),
       action(DOWNLOAD_ACTION, {
         name: "zerglang-canonical-release",
         path: "canonical",
@@ -526,80 +721,108 @@ const JOB_BOUNDARIES = Object.freeze({
   }),
 });
 
-const CREDENTIAL_BINDINGS = Object.freeze({
-  ZERG_SOURCE_DEPLOY_KEY: Object.freeze({
+const CREDENTIAL_BINDINGS = Object.freeze([
+  Object.freeze({
+    name: "ZERG_SOURCE_DEPLOY_KEY",
     job: "build",
     step: "Fetch exact source objects with one read key",
     env: "SOURCE_DEPLOY_KEY",
     kind: "source",
   }),
-  ZERGLANG_APPLE_API_ISSUER: Object.freeze({
+  Object.freeze({
+    name: "ZERGLANG_APPLE_API_ISSUER",
     job: "apple_sign",
     step: "Apply preview ad-hoc or fail-closed stable Apple signing",
     env: "ZERGLANG_APPLE_API_ISSUER",
     kind: "apple",
   }),
-  ZERGLANG_APPLE_API_KEY_ID: Object.freeze({
+  Object.freeze({
+    name: "ZERGLANG_APPLE_API_KEY_ID",
     job: "apple_sign",
     step: "Apply preview ad-hoc or fail-closed stable Apple signing",
     env: "ZERGLANG_APPLE_API_KEY_ID",
     kind: "apple",
   }),
-  ZERGLANG_APPLE_API_PRIVATE_KEY: Object.freeze({
+  Object.freeze({
+    name: "ZERGLANG_APPLE_API_PRIVATE_KEY",
     job: "apple_sign",
     step: "Apply preview ad-hoc or fail-closed stable Apple signing",
     env: "ZERGLANG_APPLE_API_PRIVATE_KEY",
     kind: "apple",
   }),
-  ZERGLANG_APPLE_CERTIFICATE: Object.freeze({
+  Object.freeze({
+    name: "ZERGLANG_APPLE_CERTIFICATE",
     job: "apple_sign",
     step: "Apply preview ad-hoc or fail-closed stable Apple signing",
     env: "ZERGLANG_APPLE_CERTIFICATE",
     kind: "apple",
   }),
-  ZERGLANG_APPLE_CERTIFICATE_PASSWORD: Object.freeze({
+  Object.freeze({
+    name: "ZERGLANG_APPLE_CERTIFICATE_PASSWORD",
     job: "apple_sign",
     step: "Apply preview ad-hoc or fail-closed stable Apple signing",
     env: "ZERGLANG_APPLE_CERTIFICATE_PASSWORD",
     kind: "apple",
   }),
-  ZERGLANG_APPLE_SIGNING_IDENTITY: Object.freeze({
+  Object.freeze({
+    name: "ZERGLANG_APPLE_SIGNING_IDENTITY",
     job: "apple_sign",
     step: "Apply preview ad-hoc or fail-closed stable Apple signing",
     env: "ZERGLANG_APPLE_SIGNING_IDENTITY",
     kind: "apple",
   }),
-  ZERGLANG_TAURI_SIGNING_PRIVATE_KEY: Object.freeze({
+  Object.freeze({
+    name: "ZERGLANG_TAURI_SIGNING_PRIVATE_KEY",
     job: "sign_updater_preview",
     step: "Sign only the preview updater archive",
     env: "TAURI_PRIVATE_KEY",
     kind: "updater",
   }),
-  ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD: Object.freeze({
+  Object.freeze({
+    name: "ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
     job: "sign_updater_preview",
     step: "Sign only the preview updater archive",
     env: "TAURI_PRIVATE_KEY_PASSWORD",
     kind: "updater",
   }),
-  ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY: Object.freeze({
+  Object.freeze({
+    name: "ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY",
+    job: "sign_cohort_preview",
+    step: "Sign only the preview cohort",
+    env: "ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY",
+    kind: "updater",
+  }),
+  Object.freeze({
+    name: "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY",
     job: "sign_updater_stable",
     step: "Sign only the stable updater archive",
     env: "TAURI_PRIVATE_KEY",
     kind: "updater",
   }),
-  ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD: Object.freeze({
+  Object.freeze({
+    name: "ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD",
     job: "sign_updater_stable",
     step: "Sign only the stable updater archive",
     env: "TAURI_PRIVATE_KEY_PASSWORD",
     kind: "updater",
   }),
-  ZERGLANG_FEED_DEPLOY_KEY: Object.freeze({
+  Object.freeze({
+    name: "ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY",
+    job: "sign_cohort_stable",
+    step: "Sign only the stable cohort",
+    env: "ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY",
+    kind: "updater",
+  }),
+  Object.freeze({
+    name: "ZERGLANG_FEED_DEPLOY_KEY",
     job: "feed",
     step: "Push only the prepared release-data commit",
     env: "FEED_DEPLOY_KEY",
     kind: "feed",
   }),
-});
+]);
+
+const CREDENTIAL_NAMES = new Set(CREDENTIAL_BINDINGS.map(({ name }) => name));
 
 function normalizedNeeds(value) {
   if (value === undefined) return [];
@@ -963,7 +1186,7 @@ export function auditWorkflowPolicy(source, canonicalSource = undefined) {
         );
       }
       for (const name of secretNames) {
-        if (CREDENTIAL_BINDINGS[name] === undefined) {
+        if (!CREDENTIAL_NAMES.has(name)) {
           addDiagnostic(
             diagnostics,
             "credential-allowlist",
@@ -1018,17 +1241,22 @@ export function auditWorkflowPolicy(source, canonicalSource = undefined) {
           );
         }
       }
-      if (updaterPolicy !== undefined && [...secretNames].some(isUpdaterSecret)) {
+      if (
+        updaterPolicy?.kind === "tauri" &&
+        [...secretNames].some(isTauriUpdaterSecret)
+      ) {
         const env = requireMapping(step.env, `${jobName} signer env`);
         const expectedPrivateKey = `\${{ secrets.${updaterPolicy.privateKey} }}`;
         const expectedPassword = `\${{ secrets.${updaterPolicy.password} }}`;
         if (
+          stepName !== updaterPolicy.tauriStep ||
           env.TAURI_PRIVATE_KEY !== expectedPrivateKey ||
           env.TAURI_PRIVATE_KEY_PASSWORD !== expectedPassword ||
           !run.includes(
-            "npm exec --offline -- tauri signer sign release-input/ZergLang.app.tar.gz",
+            "npm exec --offline -- tauri signer sign signing-input/ZergLang.app.tar.gz",
           ) ||
-          !run.includes("unset TAURI_PRIVATE_KEY TAURI_PRIVATE_KEY_PASSWORD")
+          !run.includes("unset TAURI_PRIVATE_KEY TAURI_PRIVATE_KEY_PASSWORD") ||
+          run.includes("scripts/cohort-payload.mjs sign")
         ) {
           addDiagnostic(
             diagnostics,
@@ -1036,6 +1264,28 @@ export function auditWorkflowPolicy(source, canonicalSource = undefined) {
             jobName,
             stepName,
             "updater signer must receive the channel key pair, sign once, and explicitly unset it",
+          );
+        }
+      }
+      if (
+        updaterPolicy?.kind === "cohort" &&
+        secretNames.has("ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY")
+      ) {
+        const env = requireMapping(step.env, `${jobName} cohort signer env`);
+        const expectedCohortKey = `\${{ secrets.${updaterPolicy.cohortKey} }}`;
+        if (
+          stepName !== updaterPolicy.cohortStep ||
+          env.ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY !== expectedCohortKey ||
+          !run.includes("scripts/cohort-payload.mjs sign") ||
+          !run.includes("unset ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY") ||
+          run.includes("tauri signer sign")
+        ) {
+          addDiagnostic(
+            diagnostics,
+            "updater-credential-contract",
+            jobName,
+            stepName,
+            "cohort signer must receive one release key, sign once, and explicitly unset it",
           );
         }
       }
@@ -1077,24 +1327,34 @@ export function auditWorkflowPolicy(source, canonicalSource = undefined) {
   }
 
   const credentialGroups = new Set(
-    Object.values(CREDENTIAL_BINDINGS).map(({ kind, job }) => `${kind}:${job}`),
+    CREDENTIAL_BINDINGS.map(({ kind, job }) => `${kind}:${job}`),
   );
   for (const group of credentialGroups) {
     const [kind, job] = group.split(":");
     if (jobs[job] === undefined) continue;
-    const expected = Object.entries(CREDENTIAL_BINDINGS)
-      .filter(([, binding]) => binding.kind === kind && binding.job === job);
-    const valid = expected.every(([name, binding]) => {
+    const expected = CREDENTIAL_BINDINGS
+      .filter((binding) => binding.kind === kind && binding.job === job);
+    const validBindings = expected.every((binding) => {
       const occurrences = credentialOccurrences.filter(
-        (occurrence) => occurrence.name === name,
+        (occurrence) => occurrence.name === binding.name &&
+          occurrence.job === binding.job &&
+          occurrence.step === binding.step &&
+          occurrence.env === binding.env &&
+          occurrence.value === `\${{ secrets.${binding.name} }}`,
       );
-      return occurrences.length === 1 &&
-        occurrences[0].job === binding.job &&
-        occurrences[0].step === binding.step &&
-        occurrences[0].env === binding.env &&
-        occurrences[0].value === `\${{ secrets.${name} }}`;
+      return occurrences.length === 1;
     });
-    if (valid) continue;
+    const validCounts = [...new Set(expected.map(({ name }) => name))]
+      .every((name) => credentialOccurrences
+        .filter((occurrence) => occurrence.name === name)
+        .every((occurrence) => CREDENTIAL_BINDINGS.some((binding) =>
+          binding.name === occurrence.name &&
+          binding.job === occurrence.job &&
+          binding.step === occurrence.step &&
+          binding.env === occurrence.env &&
+          occurrence.value === `\${{ secrets.${binding.name} }}`
+        )));
+    if (validBindings && validCounts) continue;
     addDiagnostic(
       diagnostics,
       `${kind}-credential-contract`,

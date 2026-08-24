@@ -195,6 +195,77 @@ test("accepts the release workflow's isolated credential boundaries", () => {
   assert.deepEqual(diagnosticIdentities(releaseWorkflow), []);
 });
 
+test("keeps Tauri and cohort private keys on independent fresh runners", () => {
+  const workflow = parse(releaseWorkflow);
+  for (const channel of ["preview", "stable"]) {
+    const updaterJob = workflow.jobs[`sign_updater_${channel}`];
+    const cohortJob = workflow.jobs[`sign_cohort_${channel}`];
+    const collector = workflow.jobs[`collect_${channel}`];
+    assert.ok(cohortJob, `${channel} cohort signer must use a separate job`);
+    assert.ok(collector, `${channel} collector must use a credential-free job`);
+    assert.notEqual(updaterJob, cohortJob);
+    assert.deepEqual(
+      Object.keys(updaterJob.steps.find((step) => step.env?.TAURI_PRIVATE_KEY).env).sort(),
+      ["TAURI_PRIVATE_KEY", "TAURI_PRIVATE_KEY_PASSWORD"],
+    );
+    assert.deepEqual(
+      Object.keys(
+        cohortJob.steps.find((step) => step.env?.ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY).env,
+      ),
+      ["ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY"],
+    );
+    assert.equal(
+      JSON.stringify(collector).includes("${{ secrets."),
+      false,
+      `${channel} collector must be credential-free`,
+    );
+    const collectRun = collector.steps.map((step) => step.run ?? "").join("\n");
+    assert.match(collectRun, /cohort-payload\.mjs prepare/);
+    assert.match(collectRun, /cmp --silent .*release-cohort\.json/);
+    assert.match(collectRun, /release-payload\.mjs/);
+  }
+});
+
+test("binds cohort trust bytes to the request commit and compiles ZLM with Rust 1.77", () => {
+  const workflow = parse(releaseWorkflow);
+  const build = workflow.jobs.build;
+  const checkout = build.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
+  assert.equal(checkout.with["fetch-depth"], 0);
+
+  const trust = findStep(
+    workflow,
+    "build",
+    "Require independent committed updater trust roots",
+  );
+  assert.equal(trust.env.REQUEST_COMMIT, "${{ needs.validate.outputs.request_commit }}");
+  assert.match(
+    trust.run,
+    /git -C release-repository show\s+\\\s+"\$REQUEST_COMMIT:keys\/zerglang-release-signing-keys\.json"/,
+  );
+  assert.match(trust.run, /cmp --silent "\$cohort_keys" "\$committed_cohort_keys"/);
+
+  const compiler = findStep(workflow, "build", "Build and test the exact compiler source");
+  assert.equal(compiler.env.RUSTUP_TOOLCHAIN, "${{ env.ZLM_RUST_TOOLCHAIN }}");
+  assert.match(compiler.run, /rustc --version/);
+  assert.match(compiler.run, /cargo --version/);
+});
+
+test("mounts the public DMG and exercises the standalone ZLM product surface", () => {
+  const workflow = parse(releaseWorkflow);
+  const smoke = workflow.jobs.signed_smoke.steps.map((step) => step.run ?? "").join("\n");
+  assert.match(smoke, /hdiutil attach .* -readonly -nobrowse/);
+  assert.match(smoke, /hdiutil detach/);
+  assert.match(smoke, /readlink .*Applications/);
+  assert.match(smoke, /standalone_toolchain.*bin\/zlm/s);
+  assert.match(smoke, /doctor --json/);
+  assert.match(smoke, /harness instructions --json/);
+  assert.match(smoke, /zlm-embed\.mjs.*--describe/s);
+  assert.match(smoke, /"\$zlm" check/);
+  assert.match(smoke, /"\$zlm" build/);
+  assert.match(smoke, /"\$zlm" run/);
+  assert.match(smoke, /standalone.*build --emit=object/s);
+});
+
 test("binds run programs and every workflow context to canonical base bytes", () => {
   assert.deepEqual(canonicalDiagnosticIdentities(releaseWorkflow), []);
 
@@ -512,7 +583,7 @@ test("binds source checkout and Rust gates through public workflow diagnostics",
 
   const missingComponents = cutoverReleaseVariant((workflow) => {
     const tools = findStep(workflow, "build", "Install pinned build tools");
-    tools.run = tools.run.replace("--component clippy,rustfmt", "");
+    tools.run = tools.run.replaceAll("--component clippy,rustfmt", "");
   });
   assert.ok(
     diagnosticIdentities(missingComponents).includes("job-contract:build:job"),
@@ -653,13 +724,21 @@ test("requires every release job, dependency edge, and public operation", () => 
         '\\"$EXPECTED_REF:$EXPECTED_REF\\"',
         'git -C source-git archive \\"$ZERGLANG_SOURCE_SHA\\"',
         "--component clippy,rustfmt",
+        "ZLM_RUST_TOOLCHAIN",
+        "1.77.0",
         "createUpdaterArtifacts = false",
+        "scripts/toolchain-package.mjs refresh",
+        "zerglang-release-signing-keys.json",
         "zerglang-unsigned-source-stage",
       ],
     },
     apple_sign: {
       needs: ["build"],
-      tokens: ["zerglang-platform-signed"],
+      tokens: [
+        "scripts/sign-macos-toolchain.sh",
+        "ZergLang-toolchain-notarization.zip",
+        "zerglang-platform-signed",
+      ],
     },
     signed_smoke: {
       needs: ["apple_sign"],
@@ -670,18 +749,64 @@ test("requires every release job, dependency edge, and public operation", () => 
         "run --tier=interpreter",
         "run --tier=jit",
         "build --emit=object",
+        "scripts/toolchain-package.mjs extract",
+        "bin/zlm",
+        "hdiutil attach",
+        "doctor --json",
+        "harness instructions --json",
+        "zlm-embed.mjs",
       ],
     },
     sign_updater_preview: {
       needs: ["validate"],
-      tokens: ["zerglang-release-payload"],
+      tokens: [
+        "tauri signer sign",
+        "zerglang-preview-updater-signature",
+      ],
+    },
+    sign_cohort_preview: {
+      needs: ["validate"],
+      tokens: [
+        "scripts/cohort-payload.mjs sign",
+        "release-cohort.signature.json",
+        "zerglang-preview-cohort-signature",
+      ],
+    },
+    collect_preview: {
+      needs: ["validate"],
+      tokens: [
+        "scripts/cohort-payload.mjs prepare",
+        "cmp --silent",
+        "scripts/release-payload.mjs",
+        "zerglang-release-payload-preview",
+      ],
     },
     sign_updater_stable: {
       needs: ["apple_sign"],
-      tokens: ["zerglang-release-payload"],
+      tokens: [
+        "tauri signer sign",
+        "zerglang-stable-updater-signature",
+      ],
+    },
+    sign_cohort_stable: {
+      needs: ["apple_sign"],
+      tokens: [
+        "scripts/cohort-payload.mjs sign",
+        "release-cohort.signature.json",
+        "zerglang-stable-cohort-signature",
+      ],
+    },
+    collect_stable: {
+      needs: ["apple_sign"],
+      tokens: [
+        "scripts/cohort-payload.mjs prepare",
+        "cmp --silent",
+        "scripts/release-payload.mjs",
+        "zerglang-release-payload-stable",
+      ],
     },
     sign_updater: {
-      needs: ["sign_updater_preview"],
+      needs: ["collect_preview"],
       tokens: [],
     },
     publish: {
@@ -693,6 +818,8 @@ test("requires every release job, dependency edge, and public operation", () => 
         ".immutable",
         "zerglang-canonical-release",
         "latest.json",
+        "release-cohort.json",
+        "zerglang-toolchain-",
       ],
     },
     feed: {
@@ -701,6 +828,8 @@ test("requires every release job, dependency edge, and public operation", () => 
         "release-data",
         "policy/scripts/feed-promotion.mjs",
         "zerglang-canonical-release",
+        "zerglang-release-signing-keys.json",
+        "toolchains/v1",
         "actions/upload-pages-artifact",
       ],
     },
@@ -710,7 +839,12 @@ test("requires every release job, dependency edge, and public operation", () => 
     },
     verify_live: {
       needs: ["deploy_pages"],
-      tokens: ["https://epoch-ml.github.io/zerglang-releases", "latest.json"],
+      tokens: [
+        "https://epoch-ml.github.io/zerglang-releases",
+        "latest.json",
+        "latest.signature.json",
+        "toolchains/v1/keys.json",
+      ],
     },
   };
 
@@ -1009,6 +1143,23 @@ test("recognizes each updater credential independently at an exact command bound
   }
 });
 
+test("rejects the shared cohort signing key outside either protected signer", () => {
+  const hostile = releaseVariant((workflow) => {
+    workflow.jobs.validate.steps.push({
+      name: "Cohort key outside protected signers",
+      env: {
+        SINGLE_SECRET: "${{ secrets.ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY }}",
+      },
+      run: "curl",
+    });
+  });
+  assert.deepEqual(diagnosticIdentities(hostile), [
+    "updater-credential-contract:sign_cohort_preview:job",
+    "updater-credential-contract:sign_cohort_stable:job",
+    "updater-secret-window:validate:Cohort key outside protected signers",
+  ]);
+});
+
 test("recognizes an updater network command after a shell command boundary", () => {
   const hostile = releaseVariant((workflow) => {
     workflow.jobs.validate.steps.push({
@@ -1073,32 +1224,36 @@ test("reports the wrong channel signer mapping", () => {
   ]);
 });
 
-test("requires exactly one updater signer step per channel", () => {
-  for (const jobName of ["sign_updater_preview", "sign_updater_stable"]) {
-    const missing = releaseVariant((workflow) => {
-      const signer = workflow.jobs[jobName].steps.findIndex((step) =>
-        typeof step.name === "string" && step.name.startsWith("Sign only the")
-      );
-      workflow.jobs[jobName].steps.splice(signer, 1);
-    });
-    assert.deepEqual(diagnosticIdentities(missing), [
-      `updater-credential-contract:${jobName}:job`,
-    ]);
+test("requires exactly one Tauri signer and one cohort signer per channel", () => {
+  for (const channel of ["preview", "stable"]) {
+    for (const [jobName, stepName] of [
+      [`sign_updater_${channel}`, `Sign only the ${channel} updater archive`],
+      [`sign_cohort_${channel}`, `Sign only the ${channel} cohort`],
+    ]) {
+      const missing = releaseVariant((workflow) => {
+        const signer = workflow.jobs[jobName].steps.findIndex(
+          (step) => step.name === stepName,
+        );
+        workflow.jobs[jobName].steps.splice(signer, 1);
+      });
+      assert.deepEqual(diagnosticIdentities(missing), [
+        `job-contract:${jobName}:job`,
+        `updater-credential-contract:${jobName}:job`,
+      ]);
 
-    const duplicate = releaseVariant((workflow) => {
-      const signer = workflow.jobs[jobName].steps.find((step) =>
-        typeof step.name === "string" && step.name.startsWith("Sign only the")
-      );
-      workflow.jobs[jobName].steps.push(structuredClone(signer));
-    });
-    assert.deepEqual(diagnosticIdentities(duplicate), [
-      `updater-credential-contract:${jobName}:job`,
-    ]);
+      const duplicate = releaseVariant((workflow) => {
+        const signer = findStep(workflow, jobName, stepName);
+        workflow.jobs[jobName].steps.push(structuredClone(signer));
+      });
+      assert.deepEqual(diagnosticIdentities(duplicate), [
+        `updater-credential-contract:${jobName}:job`,
+      ]);
+    }
   }
 });
 
-test("requires each channel signer to receive both exact keys, sign once, and unset", () => {
-  const cases = [
+test("requires each signer to receive only its exact keys, sign once, and unset", () => {
+  const tauriCases = [
     (step) => {
       step.env.TAURI_PRIVATE_KEY = "${{ secrets.ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY }}";
     },
@@ -1107,7 +1262,7 @@ test("requires each channel signer to receive both exact keys, sign once, and un
     },
     (step) => {
       step.run = step.run.replace(
-        "npm exec --offline -- tauri signer sign release-input/ZergLang.app.tar.gz",
+        "npm exec --offline -- tauri signer sign signing-input/ZergLang.app.tar.gz",
         "echo skipped-signing",
       );
     },
@@ -1118,7 +1273,7 @@ test("requires each channel signer to receive both exact keys, sign once, and un
       );
     },
   ];
-  for (const mutate of cases) {
+  for (const mutate of tauriCases) {
     const hostile = releaseVariant((workflow) => {
       mutate(findStep(
         workflow,
@@ -1132,20 +1287,59 @@ test("requires each channel signer to receive both exact keys, sign once, and un
       ),
     );
   }
+
+  const cohortCases = [
+    [
+      (step) => {
+        step.env.ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY = "ordinary-text";
+      },
+      "updater-credential-contract:sign_cohort_preview:job",
+    ],
+    [
+      (step) => {
+        step.run = step.run.replace(
+          "node scripts/cohort-payload.mjs sign",
+          "echo skipped-cohort-signing",
+        );
+      },
+      "updater-credential-contract:sign_cohort_preview:Sign only the preview cohort",
+    ],
+    [
+      (step) => {
+        step.run = step.run.replace(
+          "unset ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY",
+          "echo cohort-key-still-live",
+        );
+      },
+      "updater-credential-contract:sign_cohort_preview:Sign only the preview cohort",
+    ],
+  ];
+  for (const [mutate, expected] of cohortCases) {
+    const hostile = releaseVariant((workflow) => {
+      mutate(findStep(
+        workflow,
+        "sign_cohort_preview",
+        "Sign only the preview cohort",
+      ));
+    });
+    assert.ok(diagnosticIdentities(hostile).includes(expected));
+  }
 });
 
 test("fails the signer contract when a credential-bearing step has no shell program", () => {
-  for (const run of [null, 42]) {
-    const hostile = releaseVariant((workflow) => {
-      findStep(
-        workflow,
-        "sign_updater_preview",
-        "Sign only the preview updater archive",
-      ).run = run;
-    });
-    assert.deepEqual(diagnosticIdentities(hostile), [
-      "updater-credential-contract:sign_updater_preview:Sign only the preview updater archive",
-    ]);
+  for (const [jobName, stepName] of [
+    ["sign_updater_preview", "Sign only the preview updater archive"],
+    ["sign_cohort_preview", "Sign only the preview cohort"],
+  ]) {
+    for (const run of [null, 42]) {
+      const hostile = releaseVariant((workflow) => {
+        findStep(workflow, jobName, stepName).run = run;
+      });
+      assert.deepEqual(diagnosticIdentities(hostile), [
+        `job-contract:${jobName}:job`,
+        `updater-credential-contract:${jobName}:${stepName}`,
+      ]);
+    }
   }
 });
 

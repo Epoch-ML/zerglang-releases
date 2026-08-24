@@ -1,10 +1,11 @@
 # ZergLang releases
 
 This public repository is the distribution boundary for the Apple Silicon
-ZergLang IDE. It contains release requests, public GitHub Release assets, and
-the GitHub Pages updater manifests consumed by installed applications. The
-ZergLang source remains in `Epoch-ML/zerg` and is checked out at the immutable
-40-character commit recorded by each request.
+ZergLang IDE and ZLM command-line toolchain. It contains immutable cohort
+requests, public GitHub Release assets, and the GitHub Pages feeds consumed by
+the IDE, `zlm update`, and zerglang.com. The ZergLang source remains in
+`Epoch-ML/zerg` and is checked out at the immutable 40-character commit
+recorded by each request.
 
 Release publication is intentionally request-driven:
 
@@ -12,40 +13,54 @@ Release publication is intentionally request-driven:
    JSON artifact. A human downloads that artifact, verifies it, adds exactly
    that one file to `requests/`, and opens a pull request. Source CI holds no
    credential capable of writing to this repository.
-2. This repository validates the request schema, channel, strict SemVer,
+2. This repository validates the exact `zerglang.release-request/2` schema,
+   the lockstep `products: ["ide", "toolchain"]` set, channel, strict SemVer,
    channel-specific tag, source ref, and source SHA.
 3. A pinned Apple Silicon `macos-15` runner checks out the source SHA with a
-   separate read-only deploy key, verifies the source tag and both independent
-   channel trust roots, builds/tests the compiler and IDE, and emits a bounded
-   ad-hoc source stage. It receives no Apple or updater-signing credentials.
+   separate read-only deploy key, verifies the source tag and public trust
+   roots, builds/tests the compiler, ZLM driver, and IDE, and emits a bounded
+   source stage containing both products. ZLM remains checked at Rust 1.77;
+   the IDE uses its independently pinned Rust toolchain. This job receives no
+   Apple or updater-signing credentials.
 4. A fresh Apple runner validates the hostile stage with public repository
    code, then applies preview ad-hoc signing or stable Developer ID signing and
-   notarization. It receives no updater private key.
-5. Exactly one fresh updater signer runs. Preview uses the legacy preview key;
-   stable uses a distinct protected stable key. It signs only the finished
-   Apple-signed archive and emits exactly six assets, including `latest.json`
-   as an immutable recovery copy.
+   notarization to the IDE and every Mach-O toolchain component. It receives no
+   updater private key.
+5. Exactly two channel-selected fresh signers run: one receives only the Tauri
+   updater key and emits only its detached archive signature; the other receives
+   only the Ed25519 cohort key and emits only the canonical cohort plus detached
+   signature. A third credential-free runner downloads the pristine Apple
+   artifact again, rebuilds and byte-compares the expected cohort, verifies both
+   signatures, and emits exactly ten release assets. Preview and stable retain
+   distinct Tauri updater keys, and neither signing implementation shares a
+   runner with the other authority or with final collection.
 6. Publication creates or resumes a draft, rejects unexpected, duplicate, or
    mismatched assets, verifies authenticated draft bytes, publishes, and then
    requires the GitHub API to report `immutable: true`.
-7. The workflow downloads all six public assets over HTTPS, verifies their API
-   sizes/digests, checksums, updater signature, archive bounds, request
+7. The workflow downloads all ten public assets over HTTPS, verifies their API
+   sizes/digests, checksums, both updater signatures, archive bounds, request
    provenance, and exact URL shape, and promotes only those canonical bytes.
    A credential-free step prepares a bounded commit in the data-only
    `release-data` branch. The feed credential exists only in the final push
    step, which runs trusted policy from the immutable `main` workflow commit
    and never executes code from `release-data`.
 8. GitHub Pages is deployed from the verified `release-data` tree. The final
-   job byte-compares the live HTTPS `latest.json` with the canonical Release
-   asset. Feed history is monotonic and byte-idempotent.
+   job byte-compares the live IDE manifest, signed cohort, detached cohort
+   signature, and public signing-key document with canonical bytes. Feed
+   history is monotonic and byte-idempotent.
 
-The updater URLs are:
+The compatibility and cohort feed URLs are:
 
 - `https://epoch-ml.github.io/zerglang-releases/preview/latest.json`
 - `https://epoch-ml.github.io/zerglang-releases/stable/latest.json`
+- `https://epoch-ml.github.io/zerglang-releases/toolchains/v1/keys.json`
+- `https://epoch-ml.github.io/zerglang-releases/toolchains/v1/channels/preview/latest.json`
+- `https://epoch-ml.github.io/zerglang-releases/toolchains/v1/channels/preview/latest.signature.json`
+- `https://epoch-ml.github.io/zerglang-releases/toolchains/v1/channels/stable/latest.json`
+- `https://epoch-ml.github.io/zerglang-releases/toolchains/v1/channels/stable/latest.signature.json`
 
-There is deliberately no fake `latest.json`. A channel returns 404 until its
-first verified release; publishing an unsigned placeholder would create an
+There are deliberately no fake latest manifests. A channel returns 404 until
+its first verified release; publishing an unsigned placeholder would create an
 invalid updater response.
 
 ## Release request schema
@@ -54,21 +69,21 @@ Request filenames are `requests/<release_tag>.json`. Unknown keys are rejected.
 
 ```json
 {
-  "schema_version": 1,
-  "product": "ZergLang IDE",
   "channel": "preview",
-  "version": "0.2.0-rc.1",
-  "release_tag": "zerglang-ide-preview-v0.2.0-rc.1",
+  "products": ["ide", "toolchain"],
+  "release_tag": "zerglang-preview-v0.2.0-preview.1",
+  "requested_at": "2026-08-24T19:00:00.000Z",
+  "schema": "zerglang.release-request/2",
+  "source_ref": "refs/tags/zerglang-preview-v0.2.0-preview.1",
   "source_repository": "Epoch-ML/zerg",
   "source_sha": "0123456789abcdef0123456789abcdef01234567",
-  "source_ref": "refs/tags/zerglang-ide-preview-v0.2.0-rc.1",
-  "requested_at": "2026-08-05T19:00:00.000Z"
+  "version": "0.2.0-preview.1"
 }
 ```
 
-Preview tags are `zerglang-ide-preview-v<VERSION>` and accept full strict
-SemVer. Stable tags are `zerglang-ide-v<MAJOR.MINOR.PATCH>` and reject
-prerelease/build metadata.
+Preview tags are `zerglang-preview-v<VERSION>` where the version is exactly
+`MAJOR.MINOR.PATCH-(preview|beta|rc).N`. Stable tags are
+`zerglang-v<MAJOR.MINOR.PATCH>`. Neither channel accepts build metadata.
 
 Validate the policy locally with Node 22 or newer:
 
@@ -76,8 +91,29 @@ Validate the policy locally with Node 22 or newer:
 npm ci --ignore-scripts
 npm test
 npm audit --audit-level=moderate
-node scripts/release-request.mjs requests/zerglang-ide-preview-v0.2.0-rc.1.json
+node scripts/release-request.mjs requests/zerglang-preview-v0.2.0-preview.1.json
 ```
+
+After the reviewed pull request lands, create the public repository tag at the
+exact one-file request-addition commit. This is a second tag with the same name
+as the source tag, but in `Epoch-ML/zerglang-releases`; publication rejects a
+tag at `main` or at any later commit:
+
+```bash
+request_path=requests/zerglang-preview-v0.2.0-preview.1.json
+request_commit="$(git log --diff-filter=A --format=%H -- "$request_path")"
+[[ "$request_commit" =~ ^[0-9a-f]{40}$ ]]
+release_tag="$(node scripts/release-request.mjs "$request_path" | jq -r .release_tag)"
+test "$(git diff --name-status --no-renames "${request_commit}^" "$request_commit")" = \
+  "$(printf 'A\t%s' "$request_path")"
+git tag "$release_tag" "$request_commit"
+git push origin "refs/tags/$release_tag"
+test "$(git ls-remote --refs origin "refs/tags/$release_tag" | cut -f1)" = \
+  "$request_commit"
+```
+
+Do not move or recreate that tag. If any trust, source, or request byte changes,
+land a new one-file request commit and use a new version/tag.
 
 ## Repository credentials
 
@@ -86,12 +122,14 @@ credential is held by the one protected environment whose job needs it.
 
 | Location | Secret / setting | Scope |
 |---|---|---|
-| `Epoch-ML/zerg` `zerglang-release-request` environment | none | Secret-free handoff, restricted to `zerglang-ide-v*` and `zerglang-ide-preview-v*` tags; it uploads only the reviewed request artifact. |
+| `Epoch-ML/zerg` `zerglang-release-request` environment | none | Secret-free handoff, restricted to `zerglang-v*` and `zerglang-preview-v*` tags; it uploads only the reviewed request artifact. |
 | `zerglang-source-read` environment | `ZERG_SOURCE_DEPLOY_KEY` | Private key whose public half is a **read-only** deploy key on `Epoch-ML/zerg`; it may only fetch the exact source commit and tag. |
 | `preview` environment | `ZERGLANG_TAURI_SIGNING_PRIVATE_KEY` | Preview-only Tauri updater private key. |
 | `preview` environment | `ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the preview-only updater key. |
+| `preview` environment | `ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY` | PKCS#8 Ed25519 private key matching one active key in the committed cohort trust store. |
 | `zerglang-updater-stable` environment | `ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY` | Distinct stable-only Tauri private key. |
 | `zerglang-updater-stable` environment | `ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the stable-only updater key. |
+| `zerglang-updater-stable` environment | `ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY` | PKCS#8 Ed25519 private key matching one active key in the committed cohort trust store. |
 | `stable` environment | `ZERGLANG_APPLE_*` | Developer ID certificate, signing identity, and App Store Connect notarization credentials; Apple signing only. |
 | `zerglang-apple-preview` environment | none | Empty environment that keeps preview Apple-signing policy separate from updater-key custody. |
 | `zerglang-feed` environment | `ZERGLANG_FEED_DEPLOY_KEY` | Private key whose public half is the repository's only write-enabled deploy key; it may advance only `release-data` under the feed rulesets. |
@@ -102,6 +140,70 @@ The public roots are intentionally committed at
 repository. The workflow requires byte equality and refuses a shared root.
 The legacy source `updater.pubkey` remains the preview root so existing preview
 installations retain their update path.
+
+### Cohort trust bootstrap (required before cutover)
+
+This branch intentionally does not invent a production cohort-signing
+identity. Before enabling or dispatching publication, an authorized operator
+must complete one coordinated, separately reviewed trust bootstrap:
+
+1. Generate the Ed25519 private key offline with restrictive permissions and
+   retain it outside every repository:
+
+   ```bash
+   umask 077
+   openssl genpkey -algorithm Ed25519 \
+     -out zerglang-release-signing-private.pem
+   openssl pkey -in zerglang-release-signing-private.pem -pubout \
+     -out zerglang-release-signing-public.pem
+   ```
+
+2. Commit only the public document at
+   `keys/zerglang-release-signing-keys.json`. It must use schema
+   `zerglang.release-signing-keys/1`; every entry must contain exactly
+   `algorithm`, `key_id`, `public_key_pem`, and `status`. The key ID format is
+   `zerglang-release-ed25519-YYYY-MM[-suffix]`, the algorithm is `Ed25519`, and
+   a key used for new releases has status `active`.
+3. Compute SHA-256 over the exact raw file bytes (including whitespace and the
+   final newline):
+
+   ```bash
+   shasum -a 256 keys/zerglang-release-signing-keys.json
+   ```
+
+4. Set that digest as the protected `ZERGLANG_UPDATE_TRUST_ROOT_SHA256`
+   environment value used by the source release-request workflow. Set the same
+   value as `NUXT_TOOLCHAIN_RELEASE_TRUST_ROOT_SHA256` in the zerglang.com site
+   deployment. A whitespace-only change to `keys.json` changes both pins.
+
+   Set both from the same captured digest and verify the GitHub environment
+   variable before proceeding; never retype the digest:
+
+   ```bash
+   trust_sha="$(shasum -a 256 keys/zerglang-release-signing-keys.json | awk '{print $1}')"
+   gh variable set ZERGLANG_UPDATE_TRUST_ROOT_SHA256 \
+     --repo Epoch-ML/zerg --env zerglang-release-request --body "$trust_sha"
+   test "$(gh variable get ZERGLANG_UPDATE_TRUST_ROOT_SHA256 \
+     --repo Epoch-ML/zerg --env zerglang-release-request)" = "$trust_sha"
+   flyctl secrets set --app epoch-zerglang-site \
+     "NUXT_TOOLCHAIN_RELEASE_TRUST_ROOT_SHA256=$trust_sha"
+   printf 'Required zerglang.com trust digest: %s\n' "$trust_sha"
+   ```
+
+   Record the final line in the release review and compare it to the zerglang.com
+   deployment input. Do not dispatch if the site deployment cannot prove it used
+   the same value.
+5. Store the matching complete PKCS#8 private-key PEM as the environment-scoped
+   `ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY` secret in both `preview` and
+   `zerglang-updater-stable`. The workflow verifies that the derived public key
+   matches exactly one active trust-store entry before producing a signature.
+6. Create a new source commit and cohort tag after the trust pin is configured.
+   Requests created before that source build cannot be repurposed.
+
+The trust document is immutable once published by this feed. Plan rotation by
+including separately protected future public keys in the initial document;
+installed ZLM binaries pin the raw document digest and fail closed on any
+replacement.
 
 The fresh Apple-signing job targets `zerglang-apple-preview` for preview builds
 and `stable` for stable builds. The preview updater signer separately targets
@@ -155,6 +257,10 @@ that bypass first would risk locking out the only current administrator.
 its unique addition commit, that commit must add only the request, and the
 protected public tag must already target that exact request commit. Recovery
 cannot synthesize new provenance from manual channel/version/SHA inputs.
+
+If the public repository tag has not yet been created, follow the exact
+post-merge tag procedure above first. Never point it at the workflow dispatch
+commit merely because that commit is the current `main` tip.
 
 After reviewing the request and protected tag, an authorized operator starts
 or resumes it from `main` with:

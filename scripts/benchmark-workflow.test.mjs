@@ -20,7 +20,7 @@ test("benchmark publication is isolated from IDE tags and signing credentials", 
   assert.match(benchmarkWorkflow, /zlbench-\$\{RUN_ID\}/);
   assert.match(benchmarkWorkflow, /ZERGLANG_BENCHMARK_SIGNING_PRIVATE_KEY/);
   assert.match(benchmarkWorkflow, /ZERGLANG_BENCHMARK_SIGNING_KEY_ID/);
-  assert.doesNotMatch(benchmarkWorkflow, /TAURI|APPLE_CERTIFICATE|zerglang-ide-v/);
+  assert.doesNotMatch(benchmarkWorkflow, /TAURI|APPLE_CERTIFICATE|zerglang-v/);
 });
 
 test("source artifact retrieval binds the exact successful workflow attempt", () => {

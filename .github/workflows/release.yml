@@ -1,4 +1,4 @@
-name: Build and publish ZergLang IDE
+name: Build and publish ZergLang cohort
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
         required: true
 
 concurrency:
-  group: zerglang-ide-release
+  group: zerglang-publication
   cancel-in-progress: false
 
 permissions:
@@ -153,6 +153,7 @@ jobs:
       CARGO_TERM_COLOR: always
       MACOSX_DEPLOYMENT_TARGET: "15.0"
       RUST_TOOLCHAIN: "1.88.0"
+      ZLM_RUST_TOOLCHAIN: "1.77.0"
       ZERGLANG_IDE_VERSION: ${{ needs.validate.outputs.version }}
       ZERGLANG_RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
       ZERGLANG_SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
@@ -160,6 +161,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          fetch-depth: 0
           path: release-repository
           persist-credentials: false
 
@@ -233,7 +235,9 @@ jobs:
           [[ -f source/zerglang/CMakeLists.txt ]]
           [[ -f source/zerglang/ide/package-lock.json ]]
 
-      - name: Require independent committed channel trust roots
+      - name: Require independent committed updater trust roots
+        env:
+          REQUEST_COMMIT: ${{ needs.validate.outputs.request_commit }}
         shell: bash
         run: |
           set -euo pipefail
@@ -250,18 +254,43 @@ jobs:
             echo "::error::preview and stable updater trust roots must be distinct"
             exit 1
           fi
+          cohort_keys="release-repository/keys/zerglang-release-signing-keys.json"
+          [[ -f "$cohort_keys" && ! -L "$cohort_keys" && -s "$cohort_keys" ]] || {
+            echo "::error::the provisioned cohort signing trust root is unavailable"
+            exit 1
+          }
+          committed_cohort_keys="$RUNNER_TEMP/zerglang-cohort-keys-at-request.json"
+          git -C release-repository show \
+            "$REQUEST_COMMIT:keys/zerglang-release-signing-keys.json" \
+            >"$committed_cohort_keys"
+          cmp --silent "$cohort_keys" "$committed_cohort_keys" || {
+            echo "::error::cohort trust bytes differ from the immutable request commit"
+            exit 1
+          }
+          KEYS="$cohort_keys" node --input-type=module <<'NODE'
+          import { readFile } from "node:fs/promises";
+          import { validateTrustStore } from "./release-repository/scripts/cohort-payload.mjs";
+          validateTrustStore(JSON.parse(await readFile(process.env.KEYS, "utf8")));
+          NODE
+          trust_sha="$(shasum -a 256 "$cohort_keys" | awk '{print $1}')"
+          [[ "$trust_sha" =~ ^[0-9a-f]{64}$ ]]
+          echo "ZERGLANG_UPDATE_TRUST_ROOT_SHA256=$trust_sha" >>"$GITHUB_ENV"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "22.23.2"
           cache: npm
-          cache-dependency-path: source/zerglang/ide/package-lock.json
+          cache-dependency-path: |
+            source/zerglang/ide/package-lock.json
+            source/ztc/package-lock.json
 
       - name: Install pinned build tools
         shell: bash
         run: |
           set -euo pipefail
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal \
+            --component clippy,rustfmt --target aarch64-apple-darwin
+          rustup toolchain install "$ZLM_RUST_TOOLCHAIN" --profile minimal \
             --component clippy,rustfmt --target aarch64-apple-darwin
           rustup default "$RUST_TOOLCHAIN"
           [[ "$(rustc -vV | sed -n 's/^host: //p')" == "aarch64-apple-darwin" ]]
@@ -277,11 +306,22 @@ jobs:
 
       - name: Build and test the exact compiler source
         working-directory: source/zerglang
+        env:
+          RUSTUP_TOOLCHAIN: ${{ env.ZLM_RUST_TOOLCHAIN }}
         run: |
           set -euo pipefail
-          cmake --preset release
+          rustc --version | grep -F "rustc ${ZLM_RUST_TOOLCHAIN%.*}." >/dev/null
+          cargo --version | grep -F "cargo ${ZLM_RUST_TOOLCHAIN%.*}." >/dev/null
+          cmake --preset release \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            -DZL_CARGO_EXECUTABLE="$(rustup which --toolchain "$ZLM_RUST_TOOLCHAIN" cargo)" \
+            -DZL_RELEASE_BUILD=ON \
+            -DZL_RELEASE_SOURCE_SHA="$ZERGLANG_SOURCE_SHA" \
+            -DZL_UPDATE_TRUST_ROOT_SHA256="$ZERGLANG_UPDATE_TRUST_ROOT_SHA256"
           cmake --build --preset release
           ctest --preset release --output-on-failure
+          rustup run "$ZLM_RUST_TOOLCHAIN" cargo check --locked \
+            --manifest-path tools/zlm-driver/Cargo.toml --all-targets
 
       - name: Install, audit, and test the exact IDE source
         working-directory: source/zerglang/ide
@@ -352,6 +392,72 @@ jobs:
           app="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ZergLang.app"
           [[ -d "$app" && ! -L "$app" ]]
           codesign --verify --deep --strict --verbose=2 "$app"
+
+      - name: Stage the standalone toolchain inside the bounded source application
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund --prefix source/ztc
+          npm --prefix source/ztc run build:zlm-embed
+          npm --prefix source/ztc run licenses:zlm-embed:check
+          app="source/zerglang/ide/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ZergLang.app"
+          install_root="$app/Contents/Resources/toolchain"
+          bundle_root="$app/Contents/Resources/zerglang-release-toolchain"
+          node_archive="$RUNNER_TEMP/node-v22.23.2-darwin-arm64.tar.gz"
+          node_root="$RUNNER_TEMP/node-v22.23.2-darwin-arm64"
+          curl --fail --silent --show-error --location --max-redirs 0 \
+            --proto '=https' --tlsv1.2 --retry 3 --max-time 120 \
+            --output "$node_archive" \
+            https://nodejs.org/dist/v22.23.2/node-v22.23.2-darwin-arm64.tar.gz
+          echo '61130f394c1630d211dd50aecc4353d379480f36d3ac913cd85dbba1aed585c6  '"$node_archive" \
+            | shasum -a 256 -c -
+          tar -xzf "$node_archive" -C "$RUNNER_TEMP"
+          INSTALL_ROOT="$install_root" \
+          NODE_RUNTIME_ROOT="$node_root" \
+          OUTPUT_ROOT="$bundle_root" \
+          SOURCE_ROOT="$GITHUB_WORKSPACE/source/zerglang" \
+          SOURCE_SHA="$ZERGLANG_SOURCE_SHA" \
+          VERSION="$ZERGLANG_IDE_VERSION" \
+          ZTC_EMBED_PATH="$GITHUB_WORKSPACE/source/ztc/dist/zlm-embed.mjs" \
+          ZTC_SOURCE_ROOT="$GITHUB_WORKSPACE/source/ztc" \
+            node --input-type=module <<'NODE'
+          import { stageMacToolchain } from "./source/zerglang/tools/release/toolchainRelease.mjs";
+          await stageMacToolchain({
+            installRoot: process.env.INSTALL_ROOT,
+            nodeRuntimeRoot: process.env.NODE_RUNTIME_ROOT,
+            outputRoot: process.env.OUTPUT_ROOT,
+            sourceRoot: process.env.SOURCE_ROOT,
+            sourceSha: process.env.SOURCE_SHA,
+            version: process.env.VERSION,
+            ztcEmbedPath: process.env.ZTC_EMBED_PATH,
+            ztcSourceRoot: process.env.ZTC_SOURCE_ROOT,
+          });
+          NODE
+          ROOT="$bundle_root" node --input-type=module <<'NODE'
+          import { cp, lstat, readdir, realpath, rm } from "node:fs/promises";
+          import { join, sep } from "node:path";
+          const root = await realpath(process.env.ROOT);
+          async function visit(directory) {
+            for (const name of (await readdir(directory)).sort()) {
+              const path = join(directory, name);
+              const metadata = await lstat(path);
+              if (metadata.isSymbolicLink()) {
+                const target = await realpath(path);
+                if (target !== root && !target.startsWith(`${root}${sep}`)) {
+                  throw new Error(`toolchain symlink escapes its root: ${path}`);
+                }
+                await rm(path);
+                await cp(target, path, { dereference: true, recursive: true });
+              }
+              if ((await lstat(path)).isDirectory()) await visit(path);
+            }
+          }
+          await visit(root);
+          NODE
+          node release-repository/scripts/toolchain-package.mjs refresh \
+            "$bundle_root" "$ZERGLANG_IDE_VERSION" "$ZERGLANG_SOURCE_SHA"
+          node release-repository/scripts/toolchain-package.mjs verify \
+            "$bundle_root" "$ZERGLANG_IDE_VERSION" "$ZERGLANG_SOURCE_SHA"
 
       - name: Smoke-test packaged interpreter, JIT, and AOT tiers
         working-directory: source/zerglang/ide
@@ -475,6 +581,10 @@ jobs:
             throw new Error("source stage must contain application bytes");
           }
           NODE
+          standalone="$OUTPUT_DIRECTORY/ZergLang.app/Contents/Resources/zerglang-release-toolchain"
+          node scripts/toolchain-package.mjs verify "$standalone" "$VERSION" "$SOURCE_SHA"
+          mv "$standalone" "$RUNNER_TEMP/zerglang-standalone-toolchain"
+          [[ ! -e "$standalone" ]]
           plist="$OUTPUT_DIRECTORY/ZergLang.app/Contents/Info.plist"
           [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" == \
             "com.zergai.zerglang.ide" ]]
@@ -542,7 +652,17 @@ jobs:
           fi
 
           scripts/sign-macos-app.sh "$app" "$identity" "$CHANNEL" "$VERSION"
+          toolchain="$RUNNER_TEMP/zerglang-standalone-toolchain"
+          scripts/sign-macos-toolchain.sh "$toolchain" "$identity" "$CHANNEL"
           if [[ "$CHANNEL" == "stable" ]]; then
+            toolchain_zip="$RUNNER_TEMP/ZergLang-toolchain-notarization.zip"
+            toolchain_result="$RUNNER_TEMP/zerglang-toolchain-notarization.json"
+            ditto -c -k --keepParent "$toolchain" "$toolchain_zip"
+            xcrun notarytool submit "$toolchain_zip" \
+              --key "$api_key_path" --key-id "$ZERGLANG_APPLE_API_KEY_ID" \
+              --issuer "$ZERGLANG_APPLE_API_ISSUER" --wait --output-format json \
+              >"$toolchain_result"
+            jq -e '.status == "Accepted"' "$toolchain_result" >/dev/null
             app_zip="$RUNNER_TEMP/ZergLang-notarization.zip"
             app_result="$RUNNER_TEMP/zerglang-app-notarization.json"
             ditto -c -k --keepParent "$app" "$app_zip"
@@ -606,9 +726,16 @@ jobs:
         run: |
           set -euo pipefail
           app="$RUNNER_TEMP/zerglang-apple-input/ZergLang.app"
+          toolchain="$RUNNER_TEMP/zerglang-standalone-toolchain"
           output="$RUNNER_TEMP/zerglang-platform-signed"
           node scripts/package-macos.mjs "$app" "$output/ZergLang.app.tar.gz"
+          node scripts/toolchain-package.mjs refresh "$toolchain" "$VERSION" "$SOURCE_SHA"
+          node scripts/toolchain-package.mjs verify "$toolchain" "$VERSION" "$SOURCE_SHA"
+          toolchain_archive="$output/zerglang-toolchain-${VERSION}-aarch64-apple-darwin.tar.gz"
+          node scripts/toolchain-package.mjs package \
+            "$toolchain" "$toolchain_archive" "$VERSION" "$SOURCE_SHA"
           cp source-stage/updater.pubkey "$output/updater.pubkey"
+          cp keys/zerglang-release-signing-keys.json "$output/release-signing-keys.json"
           APPLE_NOTARIZED="$([[ "$CHANNEL" == "stable" ]] && echo true || echo false)" \
           APPLE_SIGNATURE="$([[ "$CHANNEL" == "stable" ]] && echo developer-id || echo ad-hoc)" \
           OUTPUT="$output/platform-metadata.json" node --input-type=module <<'NODE'
@@ -623,6 +750,22 @@ jobs:
             platform: "darwin-aarch64",
             apple_signature: process.env.APPLE_SIGNATURE,
             apple_notarized: process.env.APPLE_NOTARIZED === "true",
+          }, null, 2)}\n`);
+          NODE
+          APPLE_NOTARIZED="$([[ "$CHANNEL" == "stable" ]] && echo true || echo false)" \
+          APPLE_SIGNATURE="$([[ "$CHANNEL" == "stable" ]] && echo developer-id || echo ad-hoc)" \
+          OUTPUT="$output/toolchain-metadata.json" node --input-type=module <<'NODE'
+          import { writeFile } from "node:fs/promises";
+          await writeFile(process.env.OUTPUT, `${JSON.stringify({
+            apple_notarized: process.env.APPLE_NOTARIZED === "true",
+            apple_signature: process.env.APPLE_SIGNATURE,
+            channel: process.env.CHANNEL,
+            product: "ZergLang toolchain",
+            release_tag: process.env.RELEASE_TAG,
+            schema: "zerglang.toolchain-platform/1",
+            source_sha: process.env.SOURCE_SHA,
+            target: "aarch64-apple-darwin",
+            version: process.env.VERSION,
           }, null, 2)}\n`);
           NODE
 
@@ -645,6 +788,7 @@ jobs:
       contents: read
     env:
       CHANNEL: ${{ needs.validate.outputs.channel }}
+      SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
       VERSION: ${{ needs.validate.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -677,7 +821,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ "$(find signed -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq 4 ]]
+          [[ "$(find signed -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq 7 ]]
           if find signed -mindepth 1 -maxdepth 1 \! -type f -print -quit | grep -q .; then
             echo "::error::signed payload contains a non-regular entry"
             exit 1
@@ -688,6 +832,13 @@ jobs:
              and .platform == "darwin-aarch64"
              and .apple_signature == (if $channel == "stable" then "developer-id" else "ad-hoc" end)
              and .apple_notarized == ($channel == "stable")' "$metadata" >/dev/null
+          jq -e --arg channel "$CHANNEL" --arg version "$VERSION" --arg sha "$SOURCE_SHA" \
+            '.schema == "zerglang.toolchain-platform/1"
+             and .channel == $channel and .version == $version and .source_sha == $sha
+             and .target == "aarch64-apple-darwin"
+             and .apple_signature == (if $channel == "stable" then "developer-id" else "ad-hoc" end)
+             and .apple_notarized == ($channel == "stable")' \
+            signed/toolchain-metadata.json >/dev/null
           node --input-type=module <<'NODE'
           import { extractSourceApplication } from "./policy/scripts/package-macos.mjs";
           const result = await extractSourceApplication({
@@ -702,12 +853,22 @@ jobs:
             throw new Error("signed application archive is empty");
           }
           NODE
+          toolchain_archive="signed/zerglang-toolchain-${VERSION}-aarch64-apple-darwin.tar.gz"
+          node policy/scripts/toolchain-package.mjs extract \
+            "$toolchain_archive" "$RUNNER_TEMP/zerglang-toolchain-smoke" \
+            "$VERSION" "$SOURCE_SHA"
           app="$OUTPUT_DIRECTORY/ZergLang.app"
+          toolchain="$RUNNER_TEMP/zerglang-toolchain-smoke"
           dmg="signed/ZergLang_${VERSION}_aarch64.dmg"
           [[ -d "$app" && ! -L "$app" && -f "$dmg" && ! -L "$dmg" ]]
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign --verify --strict --verbose=2 "$dmg"
           hdiutil verify "$dmg" >/dev/null
+          while IFS= read -r -d '' path; do
+            if file -b "$path" | grep -q 'Mach-O'; then
+              codesign --verify --strict --verbose=2 "$path"
+            fi
+          done < <(find "$toolchain" -type f -print0)
           if [[ "$CHANNEL" == "stable" ]]; then
             xcrun stapler validate "$app"
             xcrun stapler validate "$dmg"
@@ -716,9 +877,12 @@ jobs:
               --context context:primary-signature --verbose=4 "$dmg" 2>&1)"
             grep -F 'source=Notarized Developer ID' <<<"$app_assessment"
             grep -F 'source=Notarized Developer ID' <<<"$dmg_assessment"
+            codesign -dv --verbose=4 "$toolchain/bin/zlc" 2>&1 \
+              | grep -F 'Authority=Developer ID Application'
           else
             codesign -dv --verbose=4 "$app" 2>&1 | grep -F 'Signature=adhoc'
             codesign -dv --verbose=4 "$dmg" 2>&1 | grep -F 'Signature=adhoc'
+            codesign -dv --verbose=4 "$toolchain/bin/zlc" 2>&1 | grep -F 'Signature=adhoc'
           fi
 
       - name: Smoke-test packaged interpreter, JIT, and AOT tiers
@@ -726,8 +890,35 @@ jobs:
         run: |
           set -euo pipefail
           app="$RUNNER_TEMP/zerglang-signed-smoke/ZergLang.app"
-          toolchain="$app/Contents/Resources/toolchain"
-          zlc="$toolchain/bin/zlc"
+          app_toolchain="$app/Contents/Resources/toolchain"
+          standalone_toolchain="$RUNNER_TEMP/zerglang-toolchain-smoke"
+          dmg="signed/ZergLang_${VERSION}_aarch64.dmg"
+          dmg_mount="$RUNNER_TEMP/zerglang-dmg-smoke"
+          mkdir "$dmg_mount"
+          mounted=false
+          cleanup_mount() {
+            if [[ "$mounted" == true ]]; then
+              hdiutil detach "$dmg_mount" >/dev/null
+            fi
+          }
+          trap cleanup_mount EXIT HUP INT TERM
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$dmg_mount" >/dev/null
+          mounted=true
+          [[ -d "$dmg_mount/ZergLang.app" && ! -L "$dmg_mount/ZergLang.app" ]]
+          [[ -L "$dmg_mount/Applications" ]]
+          [[ "$(readlink "$dmg_mount/Applications")" == "/Applications" ]]
+          [[ "$(find "$dmg_mount" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq 2 ]]
+          if find "$dmg_mount" -mindepth 1 -maxdepth 1 \
+            \! -name ZergLang.app \! -name Applications -print -quit | grep -q .; then
+            echo "::error::public DMG contains an unexpected top-level entry"
+            exit 1
+          fi
+          dmg_app="$dmg_mount/ZergLang.app"
+          dmg_toolchain="$dmg_app/Contents/Resources/toolchain"
+          codesign --verify --deep --strict --verbose=2 "$dmg_app"
+          archive_cdhash="$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^CDHash=//p')"
+          dmg_cdhash="$(codesign -dv --verbose=4 "$dmg_app" 2>&1 | sed -n 's/^CDHash=//p')"
+          [[ -n "$archive_cdhash" && "$archive_cdhash" == "$dmg_cdhash" ]]
           example="$RUNNER_TEMP/answer.zl"
           cat >"$example" <<'ZERGLANG'
           module answer;
@@ -739,17 +930,135 @@ jobs:
               }
           }
           ZERGLANG
-          [[ "$("$zlc" run --tier=interpreter "$example")" == "42" ]]
-          [[ "$("$zlc" run --tier=jit "$example")" == "42" ]]
-          object="$RUNNER_TEMP/zerglang-signed-answer.o"
-          program="$RUNNER_TEMP/zerglang-signed-answer"
-          "$zlc" build --emit=object --output="$object" "$example"
-          xcrun clang -arch arm64 -mmacosx-version-min=15.0 \
-            "$object" "$toolchain/aot_launcher.c" -o "$program"
-          [[ "$("$program")" == "42" ]]
+          tier=0
+          for toolchain in "$app_toolchain" "$dmg_toolchain" "$standalone_toolchain"; do
+            zlc="$toolchain/bin/zlc"
+            [[ "$("$zlc" run --tier=interpreter "$example")" == "42" ]]
+            [[ "$("$zlc" run --tier=jit "$example")" == "42" ]]
+            object="$RUNNER_TEMP/zerglang-signed-answer-${tier}.o"
+            program="$RUNNER_TEMP/zerglang-signed-answer-${tier}"
+            "$zlc" build --emit=object --output="$object" "$example"
+            xcrun clang -arch arm64 -mmacosx-version-min=15.0 \
+              "$object" "$toolchain/aot_launcher.c" -o "$program"
+            [[ "$("$program")" == "42" ]]
+            tier=$((tier + 1))
+          done
+          standalone_zlc="$standalone_toolchain/bin/zlc"
+          "$standalone_zlc" build --emit=object \
+            --output="$RUNNER_TEMP/zerglang-standalone-explicit.o" "$example"
+
+          smoke_root="$RUNNER_TEMP/zerglang-zlm-product-smoke"
+          project="$smoke_root/project"
+          mkdir -p "$smoke_root/home" "$smoke_root/tmp" \
+            "$project/.zerglang" "$project/src/release" "$project/out"
+          cat >"$project/.zerglang/project.json" <<'JSON'
+          {
+            "schema": "zerglang.project/1",
+            "name": "release-smoke",
+            "sourceRoots": ["src"],
+            "rootModule": "release.smoke",
+            "entrySelector": "main",
+            "edition": "core-0",
+            "preview": null,
+            "defaults": {
+              "semantics": "exact",
+              "verification": "checked",
+              "runTier": "interpreter",
+              "buildTarget": "checked",
+              "buildOutput": "out/release-smoke.zlm"
+            }
+          }
+          JSON
+          cat >"$project/src/release/smoke.zl" <<'ZERGLANG'
+          module release.smoke;
+          public value App {
+            public algorithm message main(type: Class<Self>) -> Int64 effects {} {
+              return 40 + 2;
+            }
+          }
+          ZERGLANG
+          clean() {
+            env -i HOME="$smoke_root/home" LANG=en_US.UTF-8 \
+              PATH="$standalone_toolchain/bin:/usr/bin:/bin" \
+              TMPDIR="$smoke_root/tmp" "$@"
+          }
+          zlm="$standalone_toolchain/bin/zlm"
+          [[ "$(cd "$project" && clean "$zlm" check)" == \
+            "project ok name=release-smoke sources=1" ]]
+          (cd "$project" && clean "$zlm" build >/dev/null)
+          [[ -s "$project/out/release-smoke.zlm" ]]
+          [[ -s "$project/out/release-smoke.zli" ]]
+          [[ "$(cd "$project" && clean "$zlm" run)" == "42" ]]
+          clean "$zlm" version --json \
+            | jq -e --arg version "$VERSION" --arg sha "$SOURCE_SHA" \
+              '.version == $version and .source_sha == $sha' >/dev/null
+          clean "$zlm" doctor --json \
+            | jq -e '.schema == "zerglang.doctor/1" and .status == "ok"
+              and .agent_status == "ready"' >/dev/null
+          clean "$zlm" harness instructions --json \
+            | jq -e '.schema == "zerglang.harness-instructions/1"
+              and .mcp.invocation == ["zlm", "mcp", "serve"]' >/dev/null
+          node="$standalone_toolchain/libexec/zerglang/node/bin/node"
+          embed="$standalone_toolchain/libexec/zerglang/zlm-embed.mjs"
+          clean "$node" "$embed" --describe \
+            | jq -e '.embedApiVersion == "zerglang.ztc-embed/1"
+              and .stdioProtocol == "zerglang.ztc-host/1"
+              and .updater == "host-managed" and .ambientDiscovery == false' >/dev/null
+          cleanup_mount
+          mounted=false
+          trap - EXIT HUP INT TERM
 
   sign_updater_preview:
-    name: Sign the finished updater archive on a fresh runner (preview)
+    name: Sign only the updater archive on a fresh runner (preview)
+    needs:
+      - validate
+      - signed_smoke
+    if: needs.validate.outputs.channel == 'preview'
+    runs-on: ubuntu-24.04
+    environment: preview
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.23.2"
+          cache: npm
+      - name: Install and test public updater-signing policy
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: zerglang-platform-signed
+          path: signing-input
+      - name: Sign only the preview updater archive
+        env:
+          TAURI_PRIVATE_KEY: ${{ secrets.ZERGLANG_TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_PRIVATE_KEY_PASSWORD: ${{ secrets.ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$TAURI_PRIVATE_KEY" && -n "$TAURI_PRIVATE_KEY_PASSWORD" ]] || {
+            echo "::error::preview updater signing identity is incomplete"
+            exit 1
+          }
+          cmp --silent keys/zerglang-preview-updater.pubkey signing-input/updater.pubkey
+          npm exec --offline -- tauri signer sign signing-input/ZergLang.app.tar.gz
+          [[ -s signing-input/ZergLang.app.tar.gz.sig ]]
+          unset TAURI_PRIVATE_KEY TAURI_PRIVATE_KEY_PASSWORD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: zerglang-preview-updater-signature
+          path: signing-input/ZergLang.app.tar.gz.sig
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  sign_cohort_preview:
+    name: Sign only the release cohort on a fresh runner (preview)
     needs:
       - validate
       - signed_smoke
@@ -767,8 +1076,66 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "22.23.2"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: zerglang-platform-signed
+          path: signing-input
+      - name: Prepare the unsigned preview cohort without signing credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/cohort-payload.mjs prepare \
+            "$REQUEST_PATH" \
+            "signing-input/ZergLang_${{ needs.validate.outputs.version }}_aarch64.dmg" \
+            "signing-input/zerglang-toolchain-${{ needs.validate.outputs.version }}-aarch64-apple-darwin.tar.gz" \
+            signing-input/release-cohort.json
+      - name: Sign only the preview cohort
+        env:
+          ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY" ]] || {
+            echo "::error::preview cohort signing identity is incomplete"
+            exit 1
+          }
+          node scripts/cohort-payload.mjs sign \
+            signing-input/release-cohort.json \
+            signing-input/release-signing-keys.json \
+            signing-input/release-cohort.signature.json
+          unset ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: zerglang-preview-cohort-signature
+          path: |
+            signing-input/release-cohort.json
+            signing-input/release-cohort.signature.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  collect_preview:
+    name: Collect pristine assets and detached signatures (preview)
+    needs:
+      - validate
+      - sign_updater_preview
+      - sign_cohort_preview
+    if: needs.validate.outputs.channel == 'preview'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      REQUEST_PATH: ${{ needs.validate.outputs.request_path }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.23.2"
           cache: npm
-      - name: Install and test public updater-signing policy
+      - name: Install and test public collection policy
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npm test
@@ -776,11 +1143,33 @@ jobs:
         with:
           name: zerglang-platform-signed
           path: release-input
-      - name: Prepare the public preview updater verifier
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: zerglang-preview-updater-signature
+          path: detached-updater
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: zerglang-preview-cohort-signature
+          path: detached-cohort
+      - name: Rebuild and verify the preview payload without credentials
         shell: bash
         run: |
           set -euo pipefail
-          cmp --silent keys/zerglang-preview-updater.pubkey release-input/updater.pubkey
+          [[ "$(find detached-updater -mindepth 1 -maxdepth 1 -type f -print | wc -l | tr -d ' ')" -eq 1 ]]
+          [[ -f detached-updater/ZergLang.app.tar.gz.sig && ! -L detached-updater/ZergLang.app.tar.gz.sig ]]
+          [[ "$(find detached-cohort -mindepth 1 -maxdepth 1 -type f -print | wc -l | tr -d ' ')" -eq 2 ]]
+          for name in release-cohort.json release-cohort.signature.json; do
+            [[ -f "detached-cohort/$name" && ! -L "detached-cohort/$name" ]]
+          done
+          cp detached-updater/ZergLang.app.tar.gz.sig release-input/
+          cp detached-cohort/release-cohort.json detached-cohort/release-cohort.signature.json release-input/
+          expected_cohort="$RUNNER_TEMP/zerglang-expected-preview-cohort.json"
+          node scripts/cohort-payload.mjs prepare \
+            "$REQUEST_PATH" \
+            "release-input/ZergLang_${VERSION}_aarch64.dmg" \
+            "release-input/zerglang-toolchain-${VERSION}-aarch64-apple-darwin.tar.gz" \
+            "$expected_cohort"
+          cmp --silent "$expected_cohort" release-input/release-cohort.json
           verifier_archive="$RUNNER_TEMP/minisign-0.12-linux.tar.gz"
           curl --fail --silent --show-error --location \
             --proto '=https' --proto-redir '=https' --tlsv1.2 \
@@ -794,25 +1183,6 @@ jobs:
           const fs = require("node:fs");
           fs.writeFileSync(process.env.RUNNER_TEMP + "/zerglang-updater.pub", Buffer.from(fs.readFileSync(process.env.PUBLIC_KEY, "utf8").trim(), "base64"));
           NODE
-      - name: Sign only the preview updater archive
-        env:
-          TAURI_PRIVATE_KEY: ${{ secrets.ZERGLANG_TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_PRIVATE_KEY_PASSWORD: ${{ secrets.ZERGLANG_TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ -n "$TAURI_PRIVATE_KEY" && -n "$TAURI_PRIVATE_KEY_PASSWORD" ]] || {
-            echo "::error::preview updater signing identity is incomplete"
-            exit 1
-          }
-          cmp --silent keys/zerglang-preview-updater.pubkey release-input/updater.pubkey
-          npm exec --offline -- tauri signer sign release-input/ZergLang.app.tar.gz
-          [[ -s release-input/ZergLang.app.tar.gz.sig ]]
-          unset TAURI_PRIVATE_KEY TAURI_PRIVATE_KEY_PASSWORD
-      - name: Verify and collect the preview payload without credentials
-        shell: bash
-        run: |
-          set -euo pipefail
           SIGNATURE=release-input/ZergLang.app.tar.gz.sig node - <<'NODE'
           const fs = require("node:fs");
           fs.writeFileSync(process.env.RUNNER_TEMP + "/zerglang-updater.minisig", Buffer.from(fs.readFileSync(process.env.SIGNATURE, "utf8").trim(), "base64"));
@@ -821,18 +1191,77 @@ jobs:
             -Vm release-input/ZergLang.app.tar.gz \
             -p "$RUNNER_TEMP/zerglang-updater.pub" \
             -x "$RUNNER_TEMP/zerglang-updater.minisig"
+          node scripts/cohort-payload.mjs verify \
+            release-input/release-cohort.json \
+            release-input/release-signing-keys.json \
+            release-input/release-cohort.signature.json
           node scripts/release-payload.mjs "$REQUEST_PATH" release-input release
           (cd release && sha256sum -c checksums.txt)
+          cmp --silent release-input/ZergLang.app.tar.gz release/ZergLang.app.tar.gz
+          cmp --silent "release-input/ZergLang_${VERSION}_aarch64.dmg" \
+            "release/ZergLang_${VERSION}_aarch64.dmg"
+          cmp --silent \
+            "release-input/zerglang-toolchain-${VERSION}-aarch64-apple-darwin.tar.gz" \
+            "release/zerglang-toolchain-${VERSION}-aarch64-apple-darwin.tar.gz"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: zerglang-release-payload
+          name: zerglang-release-payload-preview
           path: release/*
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
 
   sign_updater_stable:
-    name: Sign the finished updater archive on a fresh runner (stable)
+    name: Sign only the updater archive on a fresh runner (stable)
+    needs:
+      - validate
+      - signed_smoke
+    if: needs.validate.outputs.channel == 'stable'
+    runs-on: ubuntu-24.04
+    environment: zerglang-updater-stable
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.23.2"
+          cache: npm
+      - name: Install and test public updater-signing policy
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: zerglang-platform-signed
+          path: signing-input
+      - name: Sign only the stable updater archive
+        env:
+          TAURI_PRIVATE_KEY: ${{ secrets.ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_PRIVATE_KEY_PASSWORD: ${{ secrets.ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$TAURI_PRIVATE_KEY" && -n "$TAURI_PRIVATE_KEY_PASSWORD" ]] || {
+            echo "::error::stable updater signing identity is incomplete"
+            exit 1
+          }
+          cmp --silent keys/zerglang-stable-updater.pubkey signing-input/updater.pubkey
+          npm exec --offline -- tauri signer sign signing-input/ZergLang.app.tar.gz
+          [[ -s signing-input/ZergLang.app.tar.gz.sig ]]
+          unset TAURI_PRIVATE_KEY TAURI_PRIVATE_KEY_PASSWORD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: zerglang-stable-updater-signature
+          path: signing-input/ZergLang.app.tar.gz.sig
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  sign_cohort_stable:
+    name: Sign only the release cohort on a fresh runner (stable)
     needs:
       - validate
       - signed_smoke
@@ -850,8 +1279,66 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "22.23.2"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: zerglang-platform-signed
+          path: signing-input
+      - name: Prepare the unsigned stable cohort without signing credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/cohort-payload.mjs prepare \
+            "$REQUEST_PATH" \
+            "signing-input/ZergLang_${{ needs.validate.outputs.version }}_aarch64.dmg" \
+            "signing-input/zerglang-toolchain-${{ needs.validate.outputs.version }}-aarch64-apple-darwin.tar.gz" \
+            signing-input/release-cohort.json
+      - name: Sign only the stable cohort
+        env:
+          ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY" ]] || {
+            echo "::error::stable cohort signing identity is incomplete"
+            exit 1
+          }
+          node scripts/cohort-payload.mjs sign \
+            signing-input/release-cohort.json \
+            signing-input/release-signing-keys.json \
+            signing-input/release-cohort.signature.json
+          unset ZERGLANG_RELEASE_SIGNING_PRIVATE_KEY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: zerglang-stable-cohort-signature
+          path: |
+            signing-input/release-cohort.json
+            signing-input/release-cohort.signature.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  collect_stable:
+    name: Collect pristine assets and detached signatures (stable)
+    needs:
+      - validate
+      - sign_updater_stable
+      - sign_cohort_stable
+    if: needs.validate.outputs.channel == 'stable'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      REQUEST_PATH: ${{ needs.validate.outputs.request_path }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.23.2"
           cache: npm
-      - name: Install and test public updater-signing policy
+      - name: Install and test public collection policy
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npm test
@@ -859,11 +1346,33 @@ jobs:
         with:
           name: zerglang-platform-signed
           path: release-input
-      - name: Prepare the public stable updater verifier
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: zerglang-stable-updater-signature
+          path: detached-updater
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: zerglang-stable-cohort-signature
+          path: detached-cohort
+      - name: Rebuild and verify the stable payload without credentials
         shell: bash
         run: |
           set -euo pipefail
-          cmp --silent keys/zerglang-stable-updater.pubkey release-input/updater.pubkey
+          [[ "$(find detached-updater -mindepth 1 -maxdepth 1 -type f -print | wc -l | tr -d ' ')" -eq 1 ]]
+          [[ -f detached-updater/ZergLang.app.tar.gz.sig && ! -L detached-updater/ZergLang.app.tar.gz.sig ]]
+          [[ "$(find detached-cohort -mindepth 1 -maxdepth 1 -type f -print | wc -l | tr -d ' ')" -eq 2 ]]
+          for name in release-cohort.json release-cohort.signature.json; do
+            [[ -f "detached-cohort/$name" && ! -L "detached-cohort/$name" ]]
+          done
+          cp detached-updater/ZergLang.app.tar.gz.sig release-input/
+          cp detached-cohort/release-cohort.json detached-cohort/release-cohort.signature.json release-input/
+          expected_cohort="$RUNNER_TEMP/zerglang-expected-stable-cohort.json"
+          node scripts/cohort-payload.mjs prepare \
+            "$REQUEST_PATH" \
+            "release-input/ZergLang_${VERSION}_aarch64.dmg" \
+            "release-input/zerglang-toolchain-${VERSION}-aarch64-apple-darwin.tar.gz" \
+            "$expected_cohort"
+          cmp --silent "$expected_cohort" release-input/release-cohort.json
           verifier_archive="$RUNNER_TEMP/minisign-0.12-linux.tar.gz"
           curl --fail --silent --show-error --location \
             --proto '=https' --proto-redir '=https' --tlsv1.2 \
@@ -877,25 +1386,6 @@ jobs:
           const fs = require("node:fs");
           fs.writeFileSync(process.env.RUNNER_TEMP + "/zerglang-updater.pub", Buffer.from(fs.readFileSync(process.env.PUBLIC_KEY, "utf8").trim(), "base64"));
           NODE
-      - name: Sign only the stable updater archive
-        env:
-          TAURI_PRIVATE_KEY: ${{ secrets.ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_PRIVATE_KEY_PASSWORD: ${{ secrets.ZERGLANG_STABLE_TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ -n "$TAURI_PRIVATE_KEY" && -n "$TAURI_PRIVATE_KEY_PASSWORD" ]] || {
-            echo "::error::stable updater signing identity is incomplete"
-            exit 1
-          }
-          cmp --silent keys/zerglang-stable-updater.pubkey release-input/updater.pubkey
-          npm exec --offline -- tauri signer sign release-input/ZergLang.app.tar.gz
-          [[ -s release-input/ZergLang.app.tar.gz.sig ]]
-          unset TAURI_PRIVATE_KEY TAURI_PRIVATE_KEY_PASSWORD
-      - name: Verify and collect the stable payload without credentials
-        shell: bash
-        run: |
-          set -euo pipefail
           SIGNATURE=release-input/ZergLang.app.tar.gz.sig node - <<'NODE'
           const fs = require("node:fs");
           fs.writeFileSync(process.env.RUNNER_TEMP + "/zerglang-updater.minisig", Buffer.from(fs.readFileSync(process.env.SIGNATURE, "utf8").trim(), "base64"));
@@ -904,31 +1394,41 @@ jobs:
             -Vm release-input/ZergLang.app.tar.gz \
             -p "$RUNNER_TEMP/zerglang-updater.pub" \
             -x "$RUNNER_TEMP/zerglang-updater.minisig"
+          node scripts/cohort-payload.mjs verify \
+            release-input/release-cohort.json \
+            release-input/release-signing-keys.json \
+            release-input/release-cohort.signature.json
           node scripts/release-payload.mjs "$REQUEST_PATH" release-input release
           (cd release && sha256sum -c checksums.txt)
+          cmp --silent release-input/ZergLang.app.tar.gz release/ZergLang.app.tar.gz
+          cmp --silent "release-input/ZergLang_${VERSION}_aarch64.dmg" \
+            "release/ZergLang_${VERSION}_aarch64.dmg"
+          cmp --silent \
+            "release-input/zerglang-toolchain-${VERSION}-aarch64-apple-darwin.tar.gz" \
+            "release/zerglang-toolchain-${VERSION}-aarch64-apple-darwin.tar.gz"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: zerglang-release-payload
+          name: zerglang-release-payload-stable
           path: release/*
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
 
   sign_updater:
-    name: Require exactly one isolated updater signer
+    name: Require exactly one isolated channel collector
     needs:
-      - sign_updater_preview
-      - sign_updater_stable
+      - collect_preview
+      - collect_stable
     if: >-
       always() && !cancelled() &&
-      ((needs.sign_updater_preview.result == 'success' && needs.sign_updater_stable.result == 'skipped') ||
-       (needs.sign_updater_preview.result == 'skipped' && needs.sign_updater_stable.result == 'success'))
+      ((needs.collect_preview.result == 'success' && needs.collect_stable.result == 'skipped') ||
+       (needs.collect_preview.result == 'skipped' && needs.collect_stable.result == 'success'))
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
       - name: Record successful signer isolation
-        run: echo 'Exactly one channel signer produced the release payload.'
+        run: echo 'Exactly one credential-free channel collector produced the release payload.'
 
   publish:
     name: Publish immutable assets and recover from canonical bytes
@@ -963,9 +1463,9 @@ jobs:
           npm test
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: zerglang-release-payload
+          name: zerglang-release-payload-${{ needs.validate.outputs.channel }}
           path: release
-      - name: Validate the exact six generated assets
+      - name: Validate the exact ten generated assets
         shell: bash
         run: |
           set -euo pipefail
@@ -974,15 +1474,19 @@ jobs:
             release/*.dmg
             release/*.app.tar.gz
             release/*.app.tar.gz.sig
+            release/zerglang-toolchain-*.tar.gz
             release/checksums.txt
             release/latest.json
+            release/release-cohort.json
+            release/release-cohort.signature.json
             release/release-metadata.json
+            release/toolchain-metadata.json
           )
-          [[ "${#assets[@]}" -eq 6 ]] || {
-            echo "::error::expected exactly six immutable release assets; found ${#assets[@]}"
+          [[ "${#assets[@]}" -eq 10 ]] || {
+            echo "::error::expected exactly ten immutable release assets; found ${#assets[@]}"
             exit 1
           }
-          [[ "$(find release -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq 6 ]]
+          [[ "$(find release -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq 10 ]]
           if find release -mindepth 1 -maxdepth 1 \! -type f -print -quit | grep -q .; then
             echo "::error::generated release contains a non-regular entry"
             exit 1
@@ -996,8 +1500,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          release_title="ZergLang IDE $VERSION ($CHANNEL)"
-          release_body="Verified ZergLang IDE $CHANNEL release from Epoch-ML/zerg@$SOURCE_SHA."
+          release_title="ZergLang $VERSION cohort ($CHANNEL)"
+          release_body="Verified ZergLang IDE and ZLM toolchain cohort from Epoch-ML/zerg@$SOURCE_SHA."
           expected_prerelease=false
           if [[ "$CHANNEL" == "preview" ]]; then expected_prerelease=true; fi
           git -C release-repository fetch --force --no-tags origin \
@@ -1156,7 +1660,7 @@ jobs:
             "repos/$GITHUB_REPOSITORY/releases/$release_id" >"$release_json"
           jq -e --arg tag "$RELEASE_TAG" \
             '.tag_name == $tag and .draft == false and .immutable == true
-             and (.assets | length) == 6' "$release_json" >/dev/null
+             and (.assets | length) == 10' "$release_json" >/dev/null
           expected_names="$RUNNER_TEMP/zerglang-canonical-expected.txt"
           actual_names="$RUNNER_TEMP/zerglang-canonical-actual.txt"
           find release -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort \
@@ -1175,13 +1679,15 @@ jobs:
             url="$(jq -er '.browser_download_url' <<<"$record")"
             case "$name" in
               *.dmg|*.app.tar.gz) limit=$((512 * 1024 * 1024)) ;;
+              zerglang-toolchain-*.tar.gz) limit=$((2 * 1024 * 1024 * 1024)) ;;
               *.sig|checksums.txt) limit=$((1024 * 1024)) ;;
-              latest.json|release-metadata.json) limit=$((1024 * 1024)) ;;
+              latest.json|release-metadata.json|release-cohort*.json|toolchain-metadata.json) \
+                limit=$((2 * 1024 * 1024)) ;;
               *) echo "::error::unexpected canonical asset: $name"; exit 1 ;;
             esac
             [[ "$size" -le "$limit" ]]
             total=$((total + size))
-            [[ "$total" -lt $((1024 * 1024 * 1024)) ]]
+            [[ "$total" -lt $((4 * 1024 * 1024 * 1024)) ]]
             encoded_name="$(jq -rn --arg value "$name" '$value|@uri')"
             expected_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$encoded_tag/$encoded_name"
             [[ "$url" == "$expected_url" ]] || {
@@ -1205,7 +1711,16 @@ jobs:
           const archive = "ZergLang.app.tar.gz";
           const signature = `${archive}.sig`;
           const dmg = `ZergLang_${process.env.VERSION}_aarch64.dmg`;
-          const names = [archive, signature, dmg].sort();
+          const toolchain = `zerglang-toolchain-${process.env.VERSION}-aarch64-apple-darwin.tar.gz`;
+          const names = [
+            archive,
+            signature,
+            dmg,
+            toolchain,
+            "toolchain-metadata.json",
+            "release-cohort.json",
+            "release-cohort.signature.json",
+          ].sort();
           const artifacts = [];
           for (const name of names) {
             const bytes = await readFile(`${root}/${name}`);
@@ -1219,14 +1734,14 @@ jobs:
           assert.equal(await readFile(`${root}/checksums.txt`, "utf8"), expectedChecksums);
           const metadata = JSON.parse(await readFile(`${root}/release-metadata.json`, "utf8"));
           assert.deepEqual(Object.keys(metadata).sort(), [
-            "apple_notarized", "artifacts", "channel", "platform", "product",
-            "schema_version", "source_sha", "version",
+            "apple_notarized", "artifacts", "channel", "products", "schema",
+            "source_sha", "target", "version",
           ]);
-          assert.equal(metadata.schema_version, 1);
-          assert.equal(metadata.product, "ZergLang IDE");
+          assert.equal(metadata.schema, "zerglang.release-metadata/2");
+          assert.deepEqual(metadata.products, ["ide", "toolchain"]);
           assert.equal(metadata.version, process.env.VERSION);
           assert.equal(metadata.channel, process.env.CHANNEL);
-          assert.equal(metadata.platform, "darwin-aarch64");
+          assert.equal(metadata.target, "aarch64-apple-darwin");
           assert.equal(metadata.source_sha, process.env.SOURCE_SHA);
           assert.equal(metadata.apple_notarized, process.env.CHANNEL === "stable");
           assert.deepEqual(metadata.artifacts, artifacts);
@@ -1247,6 +1762,23 @@ jobs:
           );
           NODE
           (cd "$canonical" && sha256sum -c checksums.txt)
+          node release-repository/scripts/cohort-payload.mjs verify \
+            "$canonical/release-cohort.json" \
+            release-repository/keys/zerglang-release-signing-keys.json \
+            "$canonical/release-cohort.signature.json"
+          CANONICAL="$canonical" node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import { createHash } from "node:crypto";
+          import { readFile, stat } from "node:fs/promises";
+          const root = process.env.CANONICAL;
+          const cohort = JSON.parse(await readFile(`${root}/release-cohort.json`, "utf8"));
+          for (const product of ["ide", "toolchain"]) {
+            const asset = cohort.products[product].asset;
+            const bytes = await readFile(`${root}/${asset.name}`);
+            assert.equal(createHash("sha256").update(bytes).digest("hex"), asset.sha256);
+            assert.equal((await stat(`${root}/${asset.name}`)).size, asset.size);
+          }
+          NODE
           jq -e --arg version "$VERSION" --arg channel "$CHANNEL" --arg sha "$SOURCE_SHA" \
             '.version == $version and .channel == $channel and .source_sha == $sha' \
             "$canonical/release-metadata.json" >/dev/null
@@ -1288,6 +1820,9 @@ jobs:
           });
           if (result.entryCount < 2 || result.uncompressedBytes < 1) throw new Error("empty app archive");
           NODE
+          node release-repository/scripts/toolchain-package.mjs extract \
+            "$canonical/zerglang-toolchain-${VERSION}-aarch64-apple-darwin.tar.gz" \
+            "$RUNNER_TEMP/zerglang-canonical-toolchain" "$VERSION" "$SOURCE_SHA"
 
       - name: Upload canonical verified release payload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -1345,8 +1880,8 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" >"$release_json"
           jq -e --arg tag "$RELEASE_TAG" \
             '.tag_name == $tag and .draft == false and .immutable == true
-             and (.assets | length) == 6' "$release_json" >/dev/null
-          [[ "$(find ../canonical -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq 6 ]]
+             and (.assets | length) == 10' "$release_json" >/dev/null
+          [[ "$(find ../canonical -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq 10 ]]
           if find ../canonical -mindepth 1 -maxdepth 1 \! -type f -print -quit | grep -q .; then
             echo "::error::canonical artifact contains a non-regular entry"
             exit 1
@@ -1357,6 +1892,10 @@ jobs:
             ../canonical/release-metadata.json >/dev/null
           jq -e --arg version "$VERSION" '.version == $version' \
             ../canonical/latest.json >/dev/null
+          node scripts/cohort-payload.mjs verify \
+            ../canonical/release-cohort.json \
+            keys/zerglang-release-signing-keys.json \
+            ../canonical/release-cohort.signature.json
 
       - name: Clone release-data and prepare strict SSH host keys without credentials
         shell: bash
@@ -1380,6 +1919,7 @@ jobs:
           set -euo pipefail
           node policy/scripts/feed-promotion.mjs prepare \
             data canonical "$CHANNEL" "$VERSION" "$RELEASE_TAG" \
+            policy/keys/zerglang-release-signing-keys.json \
             | tee "$RUNNER_TEMP/zerglang-feed-prepared.json"
           jq -e --arg channel "$CHANNEL" --arg version "$VERSION" \
             '.status == "committed" or .status == "unchanged"' \
@@ -1387,6 +1927,12 @@ jobs:
           cmp canonical/latest.json "data/site/$CHANNEL/latest.json"
           cmp canonical/release-metadata.json \
             "data/site/$CHANNEL/releases/$VERSION.json"
+          cmp canonical/release-cohort.json \
+            "data/site/toolchains/v1/channels/$CHANNEL/latest.json"
+          cmp canonical/release-cohort.signature.json \
+            "data/site/toolchains/v1/channels/$CHANNEL/latest.signature.json"
+          cmp policy/keys/zerglang-release-signing-keys.json \
+            data/site/toolchains/v1/keys.json
 
       - name: Push only the prepared release-data commit
         env:
@@ -1460,11 +2006,15 @@ jobs:
       CHANNEL: ${{ needs.validate.outputs.channel }}
       PAGE_URL: ${{ needs.deploy_pages.outputs.page_url }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: policy
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: zerglang-canonical-release
           path: canonical
-      - name: Require byte-identical live latest.json over HTTPS
+      - name: Require byte-identical live IDE and toolchain feeds over HTTPS
         shell: bash
         run: |
           set -euo pipefail
@@ -1474,17 +2024,34 @@ jobs:
             echo "::error::Pages deployed to unexpected origin: $page_origin"
             exit 1
           }
-          live="$RUNNER_TEMP/zerglang-live-latest.json"
-          url="$expected_origin/$CHANNEL/latest.json?run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          paths=(
+            "$CHANNEL/latest.json"
+            "toolchains/v1/channels/$CHANNEL/latest.json"
+            "toolchains/v1/channels/$CHANNEL/latest.signature.json"
+            "toolchains/v1/keys.json"
+          )
+          expected=(
+            "canonical/latest.json"
+            "canonical/release-cohort.json"
+            "canonical/release-cohort.signature.json"
+            "policy/keys/zerglang-release-signing-keys.json"
+          )
           for attempt in {1..30}; do
-            if curl --fail --silent --show-error --location --retry 2 --retry-all-errors \
-              --proto '=https' --proto-redir '=https' --tlsv1.2 \
-              --max-filesize 1048576 --output "$live" "$url" \
-              && cmp canonical/latest.json "$live"; then
-              exit 0
-            fi
+            matched=true
+            for index in "${!paths[@]}"; do
+              live="$RUNNER_TEMP/zerglang-live-$index.json"
+              url="$expected_origin/${paths[$index]}?run=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+              if ! curl --fail --silent --show-error --location --retry 2 --retry-all-errors \
+                --proto '=https' --proto-redir '=https' --tlsv1.2 \
+                --max-filesize 2097152 --output "$live" "$url" \
+                || ! cmp "${expected[$index]}" "$live"; then
+                matched=false
+                break
+              fi
+            done
+            if [[ "$matched" == true ]]; then exit 0; fi
             [[ "$attempt" -lt 30 ]] || break
             sleep 10
           done
-          echo "::error::live Pages latest.json never matched canonical release bytes"
+          echo "::error::live Pages cohort feeds never matched canonical release bytes"
           exit 1
