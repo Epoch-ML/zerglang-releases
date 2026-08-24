@@ -322,6 +322,20 @@ jobs:
           ctest --preset release --output-on-failure
           rustup run "$ZLM_RUST_TOOLCHAIN" cargo check --locked \
             --manifest-path tools/zlm-driver/Cargo.toml --all-targets
+          cmake_install="$RUNNER_TEMP/zerglang-cmake-install"
+          [[ ! -e "$cmake_install" ]]
+          cmake --install out/build/release --prefix "$RUNNER_TEMP/zerglang-cmake-install"
+          for path in \
+            bin/zlc \
+            bin/zlm \
+            bin/zlsync \
+            bin/zlbench-exec \
+            libexec/zerglang/zlc-core \
+            libexec/zerglang/zlm-driver \
+            libexec/zerglang/zlm-runtime \
+            include/zerglang/zerglang.h; do
+            [[ -e "$cmake_install/$path" && ! -L "$cmake_install/$path" ]]
+          done
 
       - name: Install, audit, and test the exact IDE source
         working-directory: source/zerglang/ide
@@ -403,6 +417,11 @@ jobs:
           app="source/zerglang/ide/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/ZergLang.app"
           install_root="$app/Contents/Resources/toolchain"
           bundle_root="$app/Contents/Resources/zerglang-release-toolchain"
+          cmake_install="$RUNNER_TEMP/zerglang-cmake-install"
+          source/zerglang/ide/scripts/stage-macos-toolchain.sh \
+            --skip-build \
+            --source-install-dir "$cmake_install" \
+            --output-dir "$install_root"
           node_archive="$RUNNER_TEMP/node-v22.23.2-darwin-arm64.tar.gz"
           node_root="$RUNNER_TEMP/node-v22.23.2-darwin-arm64"
           curl --fail --silent --show-error --location --max-redirs 0 \
@@ -433,6 +452,9 @@ jobs:
             ztcSourceRoot: process.env.ZTC_SOURCE_ROOT,
           });
           NODE
+          launcher="$install_root/aot_launcher.c"
+          [[ -f "$launcher" && ! -L "$launcher" ]]
+          install -m 0644 "$launcher" "$bundle_root/aot_launcher.c"
           ROOT="$bundle_root" node --input-type=module <<'NODE'
           import { cp, lstat, readdir, realpath, rm } from "node:fs/promises";
           import { join, sep } from "node:path";

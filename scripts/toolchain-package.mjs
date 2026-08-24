@@ -39,6 +39,7 @@ const REQUIRED_RUNTIME_FILES = new Map([
   ["libexec/zerglang/zlm-embed.mjs", "0644"],
 ]);
 const REQUIRED_DISTRIBUTION_FILES = new Map([
+  ["aot_launcher.c", "0644"],
   ["VERSION", "0644"],
   ["install.sh", "0755"],
   ["libexec/zerglang/verify-toolchain.mjs", "0644"],
