@@ -1100,8 +1100,12 @@ test("collects settings through one injected read-only HTTP boundary", async () 
       },
     ],
     [
-      "Epoch-ML/zerglang-releases:actions/workflows",
-      { workflows: [{ path: ".github/workflows/release.yml", state: "disabled_manually" }] },
+      "Epoch-ML/zerglang-releases:actions/workflows/release.yml",
+      { path: ".github/workflows/release.yml", state: "disabled_manually" },
+    ],
+    [
+      "Epoch-ML/zerglang-releases:actions/workflows/policy-anchor.yml",
+      { path: ".github/workflows/policy-anchor.yml", state: "active" },
     ],
     [
       "Epoch-ML/zerglang-releases:environments",
@@ -1224,8 +1228,25 @@ test("collects settings through one injected read-only HTTP boundary", async () 
       },
     ],
     [
-      "Epoch-ML/zerg:actions/workflows",
-      { workflows: [{ path: ".github/workflows/zerglang-ide-release.yml", state: "disabled_manually" }] },
+      "Epoch-ML/zerg:actions/workflows/zerglang-ide-release.yml",
+      {
+        path: ".github/workflows/zerglang-ide-release.yml",
+        state: "disabled_manually",
+      },
+    ],
+    [
+      "Epoch-ML/zerg:actions/workflows/zergchat-native-release.yml",
+      {
+        path: ".github/workflows/zergchat-native-release.yml",
+        state: "active",
+      },
+    ],
+    [
+      "Epoch-ML/zerg:actions/workflows/zerglang-release-policy-anchor.yml",
+      {
+        path: ".github/workflows/zerglang-release-policy-anchor.yml",
+        state: "active",
+      },
     ],
     [
       "Epoch-ML/zerg:environments",
@@ -1284,6 +1305,15 @@ test("collects settings through one injected read-only HTTP boundary", async () 
   ]);
   const request = async ({ repository, path, allowNotFound = false }) => {
     calls.push(`${repository}:${path}`);
+    if (path === "actions/workflows") {
+      return {
+        total_count: 33,
+        workflows: Array.from({ length: 30 }, (_value, index) => ({
+          path: `.github/workflows/unrelated-${index}.yml`,
+          state: "active",
+        })),
+      };
+    }
     if (
       repository === "Epoch-ML/zerglang-releases" &&
       path === "environments/zerglang-feed/deployment-branch-policies"
@@ -1322,6 +1352,10 @@ test("collects settings through one injected read-only HTTP boundary", async () 
         {
           path: ".github/workflows/release.yml",
           state: "disabled_manually",
+        },
+        {
+          path: ".github/workflows/policy-anchor.yml",
+          state: "active",
         },
       ],
       environments: {
@@ -1365,6 +1399,14 @@ test("collects settings through one injected read-only HTTP boundary", async () 
         {
           path: ".github/workflows/zerglang-ide-release.yml",
           state: "disabled_manually",
+        },
+        {
+          path: ".github/workflows/zergchat-native-release.yml",
+          state: "active",
+        },
+        {
+          path: ".github/workflows/zerglang-release-policy-anchor.yml",
+          state: "active",
         },
       ],
       environments: {
