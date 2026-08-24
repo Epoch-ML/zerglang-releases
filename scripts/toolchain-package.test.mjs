@@ -26,6 +26,7 @@ const required = [
   "libexec/zerglang/zlm-embed.mjs",
 ];
 const distributionFiles = [
+  "aot_launcher.c",
   "libexec/zerglang/verify-toolchain.mjs",
   "share/licenses/node/LICENSE",
   "share/licenses/zerglang/LICENSE",
@@ -139,6 +140,7 @@ test("manifest verification detects content, mode, inventory, and provenance cha
 
 test("manifest refresh requires the complete installer, SDK, verifier, and licenses", async () => {
   for (const [path, message] of [
+    ["aot_launcher.c", /missing required distribution file: aot_launcher\.c/],
     ["install.sh", /missing required distribution file: install\.sh/],
     ["libexec/zerglang/verify-toolchain.mjs", /missing required distribution file: libexec/],
     ["include/zerglang/zerglang.h", /missing required distribution tree: include/],

@@ -250,6 +250,25 @@ test("binds cohort trust bytes to the request commit and compiles ZLM with Rust 
   assert.match(compiler.run, /cargo --version/);
 });
 
+test("stages both products from one complete installed SDK with the AOT launcher", () => {
+  const workflow = parse(releaseWorkflow);
+  const compiler = findStep(workflow, "build", "Build and test the exact compiler source");
+  assert.match(
+    compiler.run,
+    /cmake --install out\/build\/release --prefix "\$RUNNER_TEMP\/zerglang-cmake-install"/,
+  );
+
+  const stage = findStep(
+    workflow,
+    "build",
+    "Stage the standalone toolchain inside the bounded source application",
+  );
+  assert.match(stage.run, /--source-install-dir "\$cmake_install"/);
+  assert.match(stage.run, /--output-dir "\$install_root"/);
+  assert.match(stage.run, /launcher="\$install_root\/aot_launcher\.c"/);
+  assert.match(stage.run, /install -m 0644 "\$launcher" "\$bundle_root\/aot_launcher\.c"/);
+});
+
 test("mounts the public DMG and exercises the standalone ZLM product surface", () => {
   const workflow = parse(releaseWorkflow);
   const smoke = workflow.jobs.signed_smoke.steps.map((step) => step.run ?? "").join("\n");
@@ -726,7 +745,10 @@ test("requires every release job, dependency edge, and public operation", () => 
         "--component clippy,rustfmt",
         "ZLM_RUST_TOOLCHAIN",
         "1.77.0",
+        "cmake --install out/build/release",
         "createUpdaterArtifacts = false",
+        "--source-install-dir",
+        "aot_launcher.c",
         "scripts/toolchain-package.mjs refresh",
         "zerglang-release-signing-keys.json",
         "zerglang-unsigned-source-stage",
