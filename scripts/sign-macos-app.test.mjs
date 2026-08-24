@@ -51,6 +51,14 @@ async function applicationFixture() {
   await writeFile(join(fakeBin, "file"), `#!/bin/sh
 echo 'Mach-O 64-bit executable arm64'
 `, { mode: 0o755 });
+  const plistBuddy = join(fakeBin, "PlistBuddy");
+  await writeFile(plistBuddy, `#!/bin/sh
+case "$2" in
+  'Print :CFBundleIdentifier') printf '%s\n' 'com.zergai.zerglang.ide' ;;
+  'Print :CFBundleShortVersionString') printf '%s\n' '0.2.0-preview.1' ;;
+  *) exit 1 ;;
+esac
+`, { mode: 0o755 });
   const codesignLog = join(temporaryRoot, "codesign.log");
   await writeFile(join(fakeBin, "codesign"), `#!/bin/sh
 printf '%s\n' "$*" >>"$CODESIGN_LOG"
@@ -75,6 +83,7 @@ exit 0
   return {
     app,
     codesignLog,
+    plistBuddy,
     env: {
       ...process.env,
       CODESIGN_LOG: codesignLog,
@@ -87,7 +96,7 @@ test("signs the IDE's embedded toolchain under the standalone authority split", 
   const fixture = await applicationFixture();
   const result = spawnSync(
     "bash",
-    [script, fixture.app, "-", "preview", "0.2.0-preview.1"],
+    [script, fixture.app, "-", "preview", "0.2.0-preview.1", fixture.plistBuddy],
     { encoding: "utf8", env: fixture.env },
   );
   assert.equal(result.status, 0, result.stderr);
