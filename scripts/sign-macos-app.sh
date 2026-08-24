@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "$#" -ne 4 ]]; then
-  echo "usage: $0 APPLICATION.app IDENTITY CHANNEL VERSION" >&2
+if [[ "$#" -lt 4 || "$#" -gt 5 ]]; then
+  echo "usage: $0 APPLICATION.app IDENTITY CHANNEL VERSION [PLIST_BUDDY]" >&2
   exit 2
 fi
 
@@ -10,11 +10,16 @@ app="$1"
 identity="$2"
 channel="$3"
 version="$4"
+plist_buddy="${5:-/usr/libexec/PlistBuddy}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 plist="$app/Contents/Info.plist"
 
 if [[ ! -d "$app/Contents" || -L "$app" || ! -f "$plist" || -L "$plist" ]]; then
   echo "invalid ZergLang application bundle" >&2
+  exit 1
+fi
+if [[ ! -f "$plist_buddy" || ! -x "$plist_buddy" || -L "$plist_buddy" ]]; then
+  echo "PlistBuddy must be a regular executable" >&2
   exit 1
 fi
 if [[ "$channel" != "preview" && "$channel" != "stable" ]]; then
@@ -38,8 +43,8 @@ if find "$app" \! -type d \! -type f -print -quit | grep -q .; then
   exit 1
 fi
 
-identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")"
-bundle_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")"
+identifier="$("$plist_buddy" -c 'Print :CFBundleIdentifier' "$plist")"
+bundle_version="$("$plist_buddy" -c 'Print :CFBundleShortVersionString' "$plist")"
 [[ "$identifier" == "com.zergai.zerglang.ide" ]] || {
   echo "unexpected bundle identifier: $identifier" >&2
   exit 1
