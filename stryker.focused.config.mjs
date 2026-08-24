@@ -3,9 +3,17 @@ const suites = Object.freeze({
     source: "scripts/anchored-policy.mjs",
     tests: ["scripts/anchored-policy.test.mjs"],
   }),
+  "cohort-payload": Object.freeze({
+    source: "scripts/cohort-payload.mjs",
+    tests: [
+      "scripts/cohort-feed.test.mjs",
+      "scripts/cohort-payload.test.mjs",
+      "scripts/release-payload.v2.test.mjs",
+    ],
+  }),
   "feed-policy": Object.freeze({
     source: "scripts/feed-policy.mjs",
-    tests: ["scripts/feed-policy.test.mjs"],
+    tests: ["scripts/cohort-feed.test.mjs", "scripts/feed-policy.test.mjs"],
   }),
   "feed-promotion": Object.freeze({
     source: "scripts/feed-promotion.mjs",
@@ -17,10 +25,7 @@ const suites = Object.freeze({
   }),
   "release-payload": Object.freeze({
     source: "scripts/release-payload.mjs",
-    tests: [
-      "scripts/release-payload-schema.test.mjs",
-      "scripts/release-payload.test.mjs",
-    ],
+    tests: ["scripts/release-payload.v2.test.mjs"],
   }),
   "release-request": Object.freeze({
     source: "scripts/release-request.mjs",
@@ -36,6 +41,10 @@ const suites = Object.freeze({
   "source-stage": Object.freeze({
     source: "scripts/source-stage.mjs",
     tests: ["scripts/source-stage.test.mjs"],
+  }),
+  "toolchain-package": Object.freeze({
+    source: "scripts/toolchain-package.mjs",
+    tests: ["scripts/toolchain-package.test.mjs"],
   }),
   "workflow-policy": Object.freeze({
     source: "scripts/workflow-policy.mjs",

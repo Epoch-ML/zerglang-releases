@@ -16,7 +16,7 @@ const execFileAsync = promisify(execFile);
 const sourceSha = "0123456789abcdef0123456789abcdef01234567";
 const request = {
   channel: "preview",
-  release_tag: "zerglang-ide-preview-v0.2.0-preview.1",
+  release_tag: "zerglang-preview-v0.2.0-preview.1",
   source_sha: sourceSha,
   version: "0.2.0-preview.1",
 };
@@ -153,7 +153,7 @@ test("rejects a source stage whose metadata can redirect signing", async () => {
     ["channel", "stable", /channel does not match/],
     ["version", "9.9.9", /version does not match/],
     ["source_sha", "abcdef0123456789abcdef0123456789abcdef01", /source SHA does not match/],
-    ["release_tag", "zerglang-ide-preview-v9.9.9", /release tag does not match/],
+    ["release_tag", "zerglang-preview-v9.9.9", /release tag does not match/],
     ["apple_signature", "developer-id", /Apple signature state does not match/],
     ["platform", "darwin-x86_64", /platform does not match/],
   ]) {

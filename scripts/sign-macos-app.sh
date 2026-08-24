@@ -52,11 +52,13 @@ bundle_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString'
 sign_args=(--force --options runtime --sign "$identity")
 if [[ "$channel" == "stable" ]]; then
   sign_args+=(--timestamp)
-  compiler_entitlements="$script_dir/CompilerStableEntitlements.plist"
 else
   sign_args+=(--timestamp=none)
-  compiler_entitlements="$script_dir/CompilerPreviewEntitlements.plist"
 fi
+
+embedded_toolchain="$app/Contents/Resources/toolchain"
+"$script_dir/sign-macos-toolchain.sh" \
+  "$embedded_toolchain" "$identity" "$channel" embedded
 
 signed_macho_count=0
 while IFS= read -r -d '' path; do
@@ -64,11 +66,8 @@ while IFS= read -r -d '' path; do
     continue
   fi
   case "$path" in
-    */Contents/Resources/toolchain/bin/zlc)
-      codesign "${sign_args[@]}" --entitlements "$compiler_entitlements" "$path"
-      ;;
-    */Contents/Resources/toolchain/bin/zlsync)
-      codesign "${sign_args[@]}" --entitlements "$script_dir/ToolEntitlements.plist" "$path"
+    "$embedded_toolchain"/*)
+      continue
       ;;
     *)
       codesign "${sign_args[@]}" "$path"
@@ -90,8 +89,8 @@ done < <(
 codesign "${sign_args[@]}" --entitlements "$script_dir/AppEntitlements.plist" "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
 
-zlc="$app/Contents/Resources/toolchain/bin/zlc"
-zlc_entitlements="$(codesign -d --entitlements - "$zlc" 2>&1)"
+zlc_core="$embedded_toolchain/libexec/zerglang/zlc-core"
+zlc_entitlements="$(codesign -d --entitlements - "$zlc_core" 2>&1)"
 grep -F 'com.apple.security.cs.allow-jit' <<<"$zlc_entitlements" >/dev/null
 grep -F 'com.apple.security.cs.allow-unsigned-executable-memory' \
   <<<"$zlc_entitlements" >/dev/null

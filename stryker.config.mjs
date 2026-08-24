@@ -1,5 +1,6 @@
 export default {
   mutate: [
+    "scripts/cohort-payload.mjs",
     "scripts/feed-promotion.mjs",
     "scripts/feed-policy.mjs",
     "scripts/package-macos.mjs",
@@ -7,6 +8,7 @@ export default {
     "scripts/release-request.mjs",
     "scripts/repository-preflight.mjs",
     "scripts/source-stage.mjs",
+    "scripts/toolchain-package.mjs",
     "scripts/workflow-policy.mjs",
   ],
   testRunner: "command",

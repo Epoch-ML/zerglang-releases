@@ -19,14 +19,14 @@ afterEach(async () => {
 
 function validRequest() {
   return {
-    schema_version: 1,
-    product: "ZergLang IDE",
     channel: "stable",
+    products: ["ide", "toolchain"],
+    schema: "zerglang.release-request/2",
     version: "0.1.2",
-    release_tag: "zerglang-ide-v0.1.2",
+    release_tag: "zerglang-v0.1.2",
     source_repository: "Epoch-ML/zerg",
     source_sha: "0123456789abcdef0123456789abcdef01234567",
-    source_ref: "refs/tags/zerglang-ide-v0.1.2",
+    source_ref: "refs/tags/zerglang-v0.1.2",
     requested_at: "2026-08-08T17:13:17.989Z",
   };
 }
@@ -87,8 +87,8 @@ test("rejects non-object, incomplete, and wrong-policy request values", () => {
   }
 
   for (const [field, value, message] of [
-    ["schema_version", 2, /schema_version must equal 1/],
-    ["product", "Other IDE", /product must equal ZergLang IDE/],
+    ["schema", "zerglang.release-request/1", /schema must equal zerglang\.release-request\/2/],
+    ["products", ["toolchain", "ide"], /products must equal ide, toolchain/],
     ["source_repository", "attacker/zerg", /source_repository must equal Epoch-ML\/zerg/],
   ]) {
     assert.throws(
@@ -116,7 +116,7 @@ test("rejects non-string, padded, and partially matched provenance", () => {
   ]) {
     const candidate = { ...validRequest(), [field]: value };
     if (field === "version") {
-      candidate.release_tag = `zerglang-ide-v${value}`;
+      candidate.release_tag = `zerglang-v${value}`;
       candidate.source_ref = `refs/tags/${candidate.release_tag}`;
     }
     assert.throws(() => validateReleaseRequest(candidate), message);

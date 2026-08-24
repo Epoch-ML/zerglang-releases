@@ -5,9 +5,16 @@ import { copyFile, lstat, mkdir, readFile, readdir, writeFile } from "node:fs/pr
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { readReleaseRequest } from "./release-request.mjs";
+import {
+  buildReleaseCohort,
+  canonicalJson,
+  verifyReleaseCohort,
+} from "./cohort-payload.mjs";
+import { readReleaseRequest, validateReleaseRequest } from "./release-request.mjs";
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const MAX_CONTROL_BYTES = 2 * 1024 * 1024;
+const MAX_ASSET_BYTES = 2 * 1024 * 1024 * 1024;
 
 async function assertExactRegularFiles(directory, expectedNames) {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -21,12 +28,14 @@ async function assertExactRegularFiles(directory, expectedNames) {
   }
 }
 
-async function requireNonemptyRegularFile(path) {
+async function requireNonemptyRegularFile(path, maximum = MAX_ASSET_BYTES) {
   const metadata = await lstat(path);
   if (!metadata.isFile() || metadata.isSymbolicLink()) {
     throw new Error(`release artifact must be a regular file: ${basename(path)}`);
   }
   if (metadata.size === 0) throw new Error(`release artifact is empty: ${basename(path)}`);
+  if (metadata.size > maximum) throw new Error(`release artifact is too large: ${basename(path)}`);
+  return metadata;
 }
 
 function parseObject(bytes, description) {
@@ -42,11 +51,31 @@ function parseObject(bytes, description) {
   return value;
 }
 
-function validatePlatformMetadata(metadata, request) {
-  if (metadata.schema_version !== 2 || metadata.product !== "ZergLang IDE") {
-    throw new Error("platform metadata schema or product is invalid");
+function exactFields(value, fields, description) {
+  const expected = [...fields].sort();
+  const actual = Object.keys(value).sort();
+  const unexpected = actual.filter((field) => !expected.includes(field));
+  if (unexpected.length !== 0) {
+    throw new Error(`${description} contains unexpected fields: ${unexpected.join(", ")}`);
   }
-  const expectedFields = new Set([
+  const missing = expected.filter((field) => !actual.includes(field));
+  if (missing.length !== 0) {
+    throw new Error(`${description} is missing required fields: ${missing.join(", ")}`);
+  }
+}
+
+function requireSigningState(metadata, request, description) {
+  if (request.channel === "stable") {
+    if (metadata.apple_signature !== "developer-id" || metadata.apple_notarized !== true) {
+      throw new Error(`stable ${description} requires Developer ID signing and notarization`);
+    }
+  } else if (metadata.apple_signature !== "ad-hoc" || metadata.apple_notarized !== false) {
+    throw new Error(`preview ${description} requires ad-hoc Apple signing without notarization`);
+  }
+}
+
+function validatePlatformMetadata(metadata, request) {
+  exactFields(metadata, [
     "apple_notarized",
     "apple_signature",
     "channel",
@@ -56,12 +85,9 @@ function validatePlatformMetadata(metadata, request) {
     "schema_version",
     "source_sha",
     "version",
-  ]);
-  const unexpected = Object.keys(metadata)
-    .filter((field) => !expectedFields.has(field))
-    .sort();
-  if (unexpected.length !== 0) {
-    throw new Error(`platform metadata contains unexpected fields: ${unexpected.join(", ")}`);
+  ], "platform metadata");
+  if (metadata.schema_version !== 2 || metadata.product !== "ZergLang IDE") {
+    throw new Error("platform metadata schema or product is invalid");
   }
   const expected = {
     channel: request.channel,
@@ -82,13 +108,40 @@ function validatePlatformMetadata(metadata, request) {
       throw new Error(`platform ${labels[field]} does not match the release request`);
     }
   }
-  if (request.channel === "stable") {
-    if (metadata.apple_signature !== "developer-id" || metadata.apple_notarized !== true) {
-      throw new Error("stable payload requires Developer ID signing and notarization");
-    }
-  } else if (metadata.apple_signature !== "ad-hoc" || metadata.apple_notarized !== false) {
-    throw new Error("preview payload requires ad-hoc Apple signing without notarization");
+  requireSigningState(metadata, request, "payload");
+}
+
+function validateToolchainMetadata(metadata, request) {
+  exactFields(metadata, [
+    "apple_notarized",
+    "apple_signature",
+    "channel",
+    "product",
+    "release_tag",
+    "schema",
+    "source_sha",
+    "target",
+    "version",
+  ], "toolchain metadata");
+  if (
+    metadata.schema !== "zerglang.toolchain-platform/1" ||
+    metadata.product !== "ZergLang toolchain"
+  ) {
+    throw new Error("toolchain metadata schema or product is invalid");
   }
+  const expected = {
+    channel: request.channel,
+    release_tag: request.release_tag,
+    source_sha: request.source_sha,
+    target: "aarch64-apple-darwin",
+    version: request.version,
+  };
+  for (const [field, value] of Object.entries(expected)) {
+    if (metadata[field] !== value) {
+      throw new Error(`toolchain ${field.replaceAll("_", " ")} does not match the release request`);
+    }
+  }
+  requireSigningState(metadata, request, "toolchain");
 }
 
 function canonicalBase64(text) {
@@ -110,7 +163,7 @@ async function digest(path) {
 export async function collectReleasePayload(options) {
   const inputDirectory = resolve(options.inputDirectory);
   const outputDirectory = resolve(options.outputDirectory);
-  const request = options.request;
+  const request = validateReleaseRequest(options.request);
   const releaseRepository = options.releaseRepository;
   if (releaseRepository !== "Epoch-ML/zerglang-releases") {
     throw new Error("release repository must equal Epoch-ML/zerglang-releases");
@@ -118,27 +171,84 @@ export async function collectReleasePayload(options) {
   const archiveName = "ZergLang.app.tar.gz";
   const signatureName = `${archiveName}.sig`;
   const dmgName = `ZergLang_${request.version}_aarch64.dmg`;
+  const toolchainName =
+    `zerglang-toolchain-${request.version}-aarch64-apple-darwin.tar.gz`;
+  const cohortName = "release-cohort.json";
+  const cohortSignatureName = "release-cohort.signature.json";
   const inputNames = new Set([
     archiveName,
     signatureName,
     dmgName,
+    toolchainName,
     "platform-metadata.json",
+    "release-signing-keys.json",
+    cohortName,
+    cohortSignatureName,
+    "toolchain-metadata.json",
     "updater.pubkey",
   ]);
   await assertExactRegularFiles(inputDirectory, inputNames);
-  for (const name of inputNames) await requireNonemptyRegularFile(join(inputDirectory, name));
+  for (const name of inputNames) {
+    const maximum = name.endsWith(".json") || name.endsWith(".sig") || name === "updater.pubkey"
+      ? MAX_CONTROL_BYTES
+      : MAX_ASSET_BYTES;
+    await requireNonemptyRegularFile(join(inputDirectory, name), maximum);
+  }
 
   const platformMetadata = parseObject(
     await readFile(join(inputDirectory, "platform-metadata.json")),
     "platform metadata",
   );
   validatePlatformMetadata(platformMetadata, request);
+  const toolchainMetadata = parseObject(
+    await readFile(join(inputDirectory, "toolchain-metadata.json")),
+    "toolchain metadata",
+  );
+  validateToolchainMetadata(toolchainMetadata, request);
   const signature = canonicalBase64(
     await readFile(join(inputDirectory, signatureName), "utf8"),
   );
+  const cohort = parseObject(
+    await readFile(join(inputDirectory, cohortName)),
+    "release cohort",
+  );
+  const cohortSignature = parseObject(
+    await readFile(join(inputDirectory, cohortSignatureName)),
+    "release cohort signature",
+  );
+  const trustStore = parseObject(
+    await readFile(join(inputDirectory, "release-signing-keys.json")),
+    "release trust store",
+  );
+  verifyReleaseCohort({ cohort, signature: cohortSignature, trustStore });
+  const expectedCohort = await buildReleaseCohort({
+    request,
+    ideAssetPath: join(inputDirectory, dmgName),
+    toolchainArchivePath: join(inputDirectory, toolchainName),
+    releaseRepository,
+  });
+  if (canonicalJson(cohort) !== canonicalJson(expectedCohort)) {
+    const expectedToolchain = expectedCohort.products.toolchain.asset;
+    const observedToolchain = cohort.products?.toolchain?.asset;
+    if (observedToolchain?.sha256 !== expectedToolchain.sha256) {
+      throw new Error("toolchain archive digest does not match the signed cohort");
+    }
+    if (observedToolchain?.size !== expectedToolchain.size) {
+      throw new Error("toolchain archive size does not match the signed cohort");
+    }
+    throw new Error("signed release cohort does not match the immutable release request and assets");
+  }
 
   await mkdir(outputDirectory, { recursive: false });
-  const artifactNames = [archiveName, signatureName, dmgName].sort();
+  const artifactNames = [
+    archiveName,
+    signatureName,
+    dmgName,
+    toolchainName,
+    "toolchain-metadata.json",
+    cohortName,
+    cohortSignatureName,
+  ].sort();
   for (const name of artifactNames) {
     await copyFile(join(inputDirectory, name), join(outputDirectory, name));
   }
@@ -154,14 +264,14 @@ export async function collectReleasePayload(options) {
   );
 
   const releaseMetadata = {
-    schema_version: 1,
-    product: "ZergLang IDE",
-    version: request.version,
-    channel: request.channel,
-    platform: "darwin-aarch64",
-    source_sha: request.source_sha,
-    apple_notarized: platformMetadata.apple_notarized,
+    apple_notarized: platformMetadata.apple_notarized && toolchainMetadata.apple_notarized,
     artifacts,
+    channel: request.channel,
+    products: ["ide", "toolchain"],
+    schema: "zerglang.release-metadata/2",
+    source_sha: request.source_sha,
+    target: "aarch64-apple-darwin",
+    version: request.version,
   };
   await writeFile(
     join(outputDirectory, "release-metadata.json"),
@@ -181,10 +291,7 @@ export async function collectReleasePayload(options) {
       },
     },
   };
-  await writeFile(
-    join(outputDirectory, "latest.json"),
-    `${JSON.stringify(manifest, null, 2)}\n`,
-  );
+  await writeFile(join(outputDirectory, "latest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 
   return {
     assets: [
@@ -198,9 +305,7 @@ export async function collectReleasePayload(options) {
 
 async function main() {
   if (process.argv.length !== 5) {
-    throw new Error(
-      "usage: release-payload.mjs REQUEST.json INPUT_DIRECTORY OUTPUT_DIRECTORY",
-    );
+    throw new Error("usage: release-payload.mjs REQUEST.json INPUT_DIRECTORY OUTPUT_DIRECTORY");
   }
   const request = await readReleaseRequest(process.argv[2]);
   const result = await collectReleasePayload({

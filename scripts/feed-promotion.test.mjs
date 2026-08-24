@@ -90,7 +90,7 @@ test("prepares and pushes only a canonical release-data commit without executing
     releaseDirectory: bundle.canonical,
     channel: "stable",
     version: "1.2.3",
-    releaseTag: "zerglang-ide-v1.2.3",
+    releaseTag: "zerglang-v1.2.3",
   });
   assert.equal(prepared.status, "committed");
   assert.deepEqual(prepared.changedPaths, [
@@ -143,7 +143,7 @@ test("preparation disables local Git hooks before creating the data commit", asy
     releaseDirectory: bundle.canonical,
     channel: "stable",
     version: "1.2.4",
-    releaseTag: "zerglang-ide-v1.2.4",
+    releaseTag: "zerglang-v1.2.4",
   });
 
   assert.equal(prepared.status, "committed");
@@ -161,14 +161,14 @@ test("is idempotent and rejects a concurrent release-data advance", async () => 
     releaseDirectory: bundle.canonical,
     channel: "stable",
     version: "2.0.0",
-    releaseTag: "zerglang-ide-v2.0.0",
+    releaseTag: "zerglang-v2.0.0",
   });
   const second = await prepareFeedPromotion({
     dataDirectory: secondData,
     releaseDirectory: bundle.canonical,
     channel: "stable",
     version: "2.0.0",
-    releaseTag: "zerglang-ide-v2.0.0",
+    releaseTag: "zerglang-v2.0.0",
   });
   await pushFeedPromotion({
     dataDirectory: bundle.data,
@@ -197,7 +197,7 @@ test("is idempotent and rejects a concurrent release-data advance", async () => 
     releaseDirectory: bundle.canonical,
     channel: "stable",
     version: "2.0.0",
-    releaseTag: "zerglang-ide-v2.0.0",
+    releaseTag: "zerglang-v2.0.0",
   });
   assert.deepEqual(unchanged, {
     status: "unchanged",
@@ -216,7 +216,7 @@ test("prepares the preview channel under its distinct tag and paths", async () =
     releaseDirectory: bundle.canonical,
     channel: "preview",
     version: "2.1.0-preview.3",
-    releaseTag: "zerglang-ide-preview-v2.1.0-preview.3",
+    releaseTag: "zerglang-preview-v2.1.0-preview.3",
   });
 
   assert.equal(prepared.status, "committed");
@@ -252,7 +252,7 @@ test("rejects invalid roots, branches, tags, and dirty input state", async () =>
       releaseDirectory: missing.canonical,
       channel: "stable",
       version: "3.0.0",
-      releaseTag: "zerglang-ide-v3.0.0",
+      releaseTag: "zerglang-v3.0.0",
     }),
     /release-data checkout does not exist/,
   );
@@ -264,7 +264,7 @@ test("rejects invalid roots, branches, tags, and dirty input state", async () =>
       releaseDirectory: missing.canonical,
       channel: "stable",
       version: "3.0.0",
-      releaseTag: "zerglang-ide-v3.0.0",
+      releaseTag: "zerglang-v3.0.0",
     }),
     /release-data checkout must be a real directory/,
   );
@@ -276,7 +276,7 @@ test("rejects invalid roots, branches, tags, and dirty input state", async () =>
       releaseDirectory: missing.canonical,
       channel: "stable",
       version: "3.0.0",
-      releaseTag: "zerglang-ide-v3.0.0",
+      releaseTag: "zerglang-v3.0.0",
     }),
     (error) =>
       error instanceof FeedPromotionError &&
@@ -290,7 +290,7 @@ test("rejects invalid roots, branches, tags, and dirty input state", async () =>
       releaseDirectory: missing.canonical,
       channel: "stable",
       version: "3.0.0",
-      releaseTag: "zerglang-ide-v3.0.0",
+      releaseTag: "zerglang-v3.0.0",
     }),
     /release-data checkout must be the Git worktree root/,
   );
@@ -302,7 +302,7 @@ test("rejects invalid roots, branches, tags, and dirty input state", async () =>
       releaseDirectory: missing.canonical,
       channel: "stable",
       version: "3.0.0",
-      releaseTag: "zerglang-ide-v3.0.0",
+      releaseTag: "zerglang-v3.0.0",
     }),
     /release-data checkout must be a real directory/,
   );
@@ -315,7 +315,7 @@ test("rejects invalid roots, branches, tags, and dirty input state", async () =>
       releaseDirectory: wrongBranch.canonical,
       channel: "stable",
       version: "3.0.0",
-      releaseTag: "zerglang-ide-v3.0.0",
+      releaseTag: "zerglang-v3.0.0",
     }),
     /feed promotion branch must be release-data/,
   );
@@ -328,9 +328,9 @@ test("rejects invalid roots, branches, tags, and dirty input state", async () =>
       releaseDirectory: wrongTag.canonical,
       channel: "stable",
       version: "3.0.0",
-      releaseTag: "zerglang-ide-preview-v3.0.0",
+      releaseTag: "zerglang-preview-v3.0.0",
     }),
-    /release tag must be zerglang-ide-v3\.0\.0/,
+    /release tag must be zerglang-v3\.0\.0/,
   );
 
   const dirty = await fixture();
@@ -342,7 +342,7 @@ test("rejects invalid roots, branches, tags, and dirty input state", async () =>
       releaseDirectory: dirty.canonical,
       channel: "stable",
       version: "3.0.0",
-      releaseTag: "zerglang-ide-v3.0.0",
+      releaseTag: "zerglang-v3.0.0",
     }),
     /release-data checkout must start clean: unexpected\.txt/,
   );
@@ -361,7 +361,7 @@ test("rejects invalid roots, branches, tags, and dirty input state", async () =>
       releaseDirectory: renamed.canonical,
       channel: "stable",
       version: "3.0.0",
-      releaseTag: "zerglang-ide-v3.0.0",
+      releaseTag: "zerglang-v3.0.0",
     }),
     /feed promotion must not rename or copy paths/,
   );
@@ -434,7 +434,7 @@ test("validates push authority, parent identity, cleanliness, and ancestry", asy
     releaseDirectory: ancestry.canonical,
     channel: "stable",
     version: "4.0.0",
-    releaseTag: "zerglang-ide-v4.0.0",
+    releaseTag: "zerglang-v4.0.0",
   });
   await writeFile(join(ancestry.data, "site", "extra.json"), "{}\n");
   await git(ancestry.data, "add", "site/extra.json");
@@ -469,7 +469,7 @@ test("exposes prepare and push through a bounded command-line interface", async 
     bundle.canonical,
     "stable",
     "5.0.0",
-    "zerglang-ide-v5.0.0",
+    "zerglang-v5.0.0",
   ]);
   const record = JSON.parse(prepared.stdout);
   assert.equal(record.status, "committed");
@@ -496,7 +496,7 @@ test("exposes prepare and push through a bounded command-line interface", async 
   );
 
   for (const args of [
-    ["unknown", bundle.data, bundle.canonical, "stable", "5.0.0", "zerglang-ide-v5.0.0"],
+    ["unknown", bundle.data, bundle.canonical, "stable", "5.0.0", "zerglang-v5.0.0"],
     ["prepare", bundle.data, bundle.canonical, "stable", "5.0.0"],
     ["unknown", bundle.data, bundle.remote, "release-data", record.parent],
     ["push", bundle.data, bundle.remote, "release-data"],

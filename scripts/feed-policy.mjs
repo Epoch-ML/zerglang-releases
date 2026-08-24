@@ -6,6 +6,8 @@ import { pathToFileURL } from "node:url";
 
 import { compare, valid } from "semver";
 
+import { verifyReleaseCohort } from "./cohort-payload.mjs";
+
 const MAX_CONTROL_BYTES = 1024 * 1024;
 const SEMVER_PATTERN =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
@@ -36,6 +38,160 @@ export function feedDestinations(channel, version) {
     latest: join(channel, "latest.json"),
     metadata: join(channel, "releases", `${version}.json`),
   };
+}
+
+export async function stageCohortFeed({
+  channel,
+  pagesDirectory,
+  releaseDirectory,
+  trustStorePath,
+  version,
+}) {
+  feedDestinations(channel, version);
+  const releaseRoot = resolve(releaseDirectory);
+  const pagesRoot = resolve(pagesDirectory);
+  const releaseMetadata = await lstat(releaseRoot).catch((error) => {
+    if (error?.code === "ENOENT") {
+      throw new FeedPolicyError("canonical release directory does not exist");
+    }
+    throw error;
+  });
+  if (releaseMetadata.isSymbolicLink() || !releaseMetadata.isDirectory()) {
+    throw new FeedPolicyError("canonical release directory must be a real directory");
+  }
+  const candidateCohort = await readOptionalRegularFile(
+    join(releaseRoot, "release-cohort.json"),
+    "canonical release cohort",
+  );
+  const candidateSignature = await readOptionalRegularFile(
+    join(releaseRoot, "release-cohort.signature.json"),
+    "canonical release cohort signature",
+  );
+  const candidateTrust = await readOptionalRegularFile(
+    resolve(trustStorePath),
+    "release trust root",
+  );
+  if (
+    candidateCohort === undefined ||
+    candidateSignature === undefined ||
+    candidateTrust === undefined
+  ) {
+    throw new FeedPolicyError("canonical cohort controls are incomplete");
+  }
+  const cohortObject = parseObject(candidateCohort, "canonical release cohort");
+  const signatureObject = parseObject(
+    candidateSignature,
+    "canonical release cohort signature",
+  );
+  const trustObject = parseObject(candidateTrust, "release trust root");
+  verifyReleaseCohort({
+    cohort: cohortObject,
+    signature: signatureObject,
+    trustStore: trustObject,
+  });
+  if (cohortObject.channel !== channel || cohortObject.version !== version) {
+    throw new FeedPolicyError("canonical cohort provenance does not match the release");
+  }
+
+  await ensureDirectory(pagesRoot, "feed root");
+  const toolchains = join(pagesRoot, "toolchains");
+  const versionRoot = join(toolchains, "v1");
+  const channelsRoot = join(versionRoot, "channels");
+  const channelRoot = join(channelsRoot, channel);
+  const releasesRoot = join(versionRoot, "releases");
+  await ensureDirectory(toolchains, "toolchain feed directory");
+  await ensureDirectory(versionRoot, "versioned toolchain feed directory");
+  await ensureDirectory(channelsRoot, "toolchain channels directory");
+  await ensureDirectory(channelRoot, "toolchain channel directory");
+  await ensureDirectory(releasesRoot, "toolchain release history directory");
+
+  const trustPath = join(versionRoot, "keys.json");
+  const currentTrust = await readOptionalRegularFile(trustPath, "current release trust root");
+  if (currentTrust === undefined) {
+    await atomicWrite(trustPath, candidateTrust);
+  } else if (!candidateTrust.equals(currentTrust)) {
+    throw new FeedPolicyError("release trust root must remain byte-identical");
+  }
+
+  const historyPath = join(releasesRoot, `${version}.json`);
+  const historySignaturePath = join(releasesRoot, `${version}.signature.json`);
+  const latestPath = join(channelRoot, "latest.json");
+  const latestSignaturePath = join(channelRoot, "latest.signature.json");
+  const currentHistory = await readOptionalRegularFile(
+    historyPath,
+    `cohort history for ${version}`,
+  );
+  const currentHistorySignature = await readOptionalRegularFile(
+    historySignaturePath,
+    `cohort signature history for ${version}`,
+  );
+  if ((currentHistory === undefined) !== (currentHistorySignature === undefined)) {
+    throw new FeedPolicyError(`cohort history for ${version} is incomplete`);
+  }
+  if (currentHistory !== undefined) {
+    requireIdentical(candidateCohort, currentHistory, `cohort history for ${version}`);
+    requireIdentical(
+      candidateSignature,
+      currentHistorySignature,
+      `cohort signature history for ${version}`,
+    );
+  }
+
+  const currentLatest = await readOptionalRegularFile(latestPath, "current release cohort");
+  const currentLatestSignature = await readOptionalRegularFile(
+    latestSignaturePath,
+    "current release cohort signature",
+  );
+  if ((currentLatest === undefined) !== (currentLatestSignature === undefined)) {
+    throw new FeedPolicyError("current release cohort feed is incomplete");
+  }
+  if (currentLatest !== undefined) {
+    const currentObject = parseObject(currentLatest, "current release cohort");
+    const currentSignatureObject = parseObject(
+      currentLatestSignature,
+      "current release cohort signature",
+    );
+    verifyReleaseCohort({
+      cohort: currentObject,
+      signature: currentSignatureObject,
+      trustStore: trustObject,
+    });
+    if (currentObject.channel !== channel) {
+      throw new FeedPolicyError("current release cohort channel does not match");
+    }
+    const ordering = compare(version, currentObject.version);
+    if (ordering < 0) {
+      throw new FeedPolicyError(
+        `candidate ${version} is older than current ${currentObject.version}`,
+      );
+    }
+    if (ordering === 0 && version !== currentObject.version) {
+      throw new FeedPolicyError(
+        `feed versions ${version} and ${currentObject.version} have equal precedence but different identities`,
+      );
+    }
+    if (ordering === 0) {
+      requireIdentical(candidateCohort, currentLatest, `latest cohort for ${version}`);
+      requireIdentical(
+        candidateSignature,
+        currentLatestSignature,
+        `latest cohort signature for ${version}`,
+      );
+      if (currentHistory === undefined) {
+        await atomicWrite(historyPath, candidateCohort);
+        await atomicWrite(historySignaturePath, candidateSignature);
+      }
+      return { status: "unchanged", version };
+    }
+  }
+
+  if (currentHistory === undefined) {
+    await atomicWrite(historyPath, candidateCohort);
+    await atomicWrite(historySignaturePath, candidateSignature);
+  }
+  await atomicWrite(latestSignaturePath, candidateSignature);
+  await atomicWrite(latestPath, candidateCohort);
+  return { status: "published", version };
 }
 
 async function readOptionalRegularFile(path, description) {

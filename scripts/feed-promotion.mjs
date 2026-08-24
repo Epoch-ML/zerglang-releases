@@ -6,7 +6,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { feedDestinations, stageReleaseFeed } from "./feed-policy.mjs";
+import { feedDestinations, stageCohortFeed, stageReleaseFeed } from "./feed-policy.mjs";
 
 const executeFile = promisify(execFile);
 const SHA_PATTERN = /^[0-9a-f]{40}$/;
@@ -52,8 +52,8 @@ async function git(dataDirectory, args, options = {}) {
 
 function expectedTag(channel, version) {
   return channel === "stable"
-    ? `zerglang-ide-v${version}`
-    : `zerglang-ide-preview-v${version}`;
+    ? `zerglang-v${version}`
+    : `zerglang-preview-v${version}`;
 }
 
 function parseStatus(output) {
@@ -92,6 +92,7 @@ export async function prepareFeedPromotion({
   channel,
   version,
   releaseTag,
+  trustStorePath,
 }) {
   const dataRoot = await requireReleaseDataWorktree(dataDirectory);
   const releaseRoot = resolve(releaseDirectory);
@@ -120,6 +121,15 @@ export async function prepareFeedPromotion({
     releaseDirectory: releaseRoot,
     version,
   });
+  if (trustStorePath !== undefined) {
+    await stageCohortFeed({
+      channel,
+      pagesDirectory: resolve(dataRoot, "site"),
+      releaseDirectory: releaseRoot,
+      trustStorePath,
+      version,
+    });
+  }
   const changedPaths = parseStatus(
     await git(dataRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
   );
@@ -127,6 +137,13 @@ export async function prepareFeedPromotion({
   const allowedPaths = [
     `site/${destinations.latest}`,
     `site/${destinations.metadata}`,
+    ...(trustStorePath === undefined ? [] : [
+      "site/toolchains/v1/keys.json",
+      `site/toolchains/v1/channels/${channel}/latest.json`,
+      `site/toolchains/v1/channels/${channel}/latest.signature.json`,
+      `site/toolchains/v1/releases/${version}.json`,
+      `site/toolchains/v1/releases/${version}.signature.json`,
+    ]),
   ].sort();
   for (const path of changedPaths) {
     if (!allowedPaths.includes(path)) {
@@ -156,7 +173,7 @@ export async function prepareFeedPromotion({
     "core.hooksPath=/dev/null",
     "commit",
     "-m",
-    `Publish ${releaseTag} updater manifest`,
+    `Publish ${releaseTag} updater cohort`,
   ]);
   const commit = await git(dataRoot, ["rev-parse", "HEAD"]);
   const commitParent = await git(dataRoot, ["rev-parse", "HEAD^"]);
@@ -226,13 +243,14 @@ export async function pushFeedPromotion({
 async function main() {
   const operation = process.argv[2];
   let result;
-  if (operation === "prepare" && process.argv.length === 8) {
+  if (operation === "prepare" && (process.argv.length === 8 || process.argv.length === 9)) {
     result = await prepareFeedPromotion({
       dataDirectory: process.argv[3],
       releaseDirectory: process.argv[4],
       channel: process.argv[5],
       version: process.argv[6],
       releaseTag: process.argv[7],
+      trustStorePath: process.argv[8],
     });
   } else if (operation === "push" && process.argv.length === 7) {
     result = await pushFeedPromotion({
@@ -243,7 +261,7 @@ async function main() {
     });
   } else {
     throw new FeedPromotionError(
-      "usage: feed-promotion.mjs prepare DATA RELEASE CHANNEL VERSION TAG | push DATA REMOTE release-data EXPECTED_PARENT",
+      "usage: feed-promotion.mjs prepare DATA RELEASE CHANNEL VERSION TAG [KEYS] | push DATA REMOTE release-data EXPECTED_PARENT",
     );
   }
   process.stdout.write(`${JSON.stringify(result)}\n`);
