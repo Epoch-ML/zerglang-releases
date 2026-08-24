@@ -1,0 +1,110 @@
+# Bootstrap note: this workflow becomes authoritative only after an independently
+# reviewed owner action installs it on protected main (or as an organization
+# required workflow). Pull request heads are data and are never checked out.
+name: Protected-base release policy
+
+on:
+  pull_request_target:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protected-base-release-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  anchored-policy:
+    name: Protected-base release policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: trusted-policy
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+          lfs: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.23.2"
+
+      - name: Install only protected-base policy dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund --prefix trusted-policy
+
+      - name: Fetch the immutable pull request objects without checkout
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: refs/pull/${{ github.event.pull_request.number }}/head
+          REPOSITORY_READ_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$HEAD_REF" =~ ^refs/pull/[1-9][0-9]*/head$ ]]
+          repository="$RUNNER_TEMP/immutable-pr.git"
+          export GIT_CONFIG_GLOBAL=/dev/null
+          export GIT_CONFIG_NOSYSTEM=1
+          git -c init.defaultBranch=policy init --bare --quiet "$repository"
+          git -C "$repository" remote add origin \
+            "https://github.com/${GITHUB_REPOSITORY}.git"
+          authorization="$(printf 'x-access-token:%s' "$REPOSITORY_READ_TOKEN" | base64 -w 0)"
+          header_key="http.https://github.com/.extraheader"
+          git -C "$repository" -c protocol.version=2 \
+            -c core.hooksPath=/dev/null \
+            -c "$header_key=AUTHORIZATION: basic $authorization" \
+            fetch --filter=blob:none --no-tags origin "$HEAD_REF"
+          [[ "$(git -C "$repository" rev-parse FETCH_HEAD)" == "$EXPECTED_HEAD_SHA" ]]
+          git -C "$repository" update-ref refs/policy/head "$EXPECTED_HEAD_SHA"
+          git -C "$repository" -c protocol.version=2 \
+            -c core.hooksPath=/dev/null \
+            -c "$header_key=AUTHORIZATION: basic $authorization" \
+            fetch --filter=blob:none --no-tags origin "$BASE_SHA"
+          [[ "$(git -C "$repository" rev-parse FETCH_HEAD)" == "$BASE_SHA" ]]
+          git -C "$repository" update-ref refs/policy/base "$BASE_SHA"
+          unset REPOSITORY_READ_TOKEN authorization header_key
+
+      - name: Materialize only bounded candidate data
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          repository="$RUNNER_TEMP/immutable-pr.git"
+          diff_path="$RUNNER_TEMP/candidate-paths.z"
+          candidate_path="$RUNNER_TEMP/candidate-release.yml"
+          set +o pipefail
+          git -C "$repository" -c core.hooksPath=/dev/null \
+            diff --name-only --no-renames -z "$BASE_SHA...$HEAD_SHA" \
+            | head -c 262145 >"$diff_path"
+          pipeline_status=("${PIPESTATUS[@]}")
+          set -o pipefail
+          [[ "${pipeline_status[1]}" -eq 0 ]]
+          [[ "${pipeline_status[0]}" -eq 0 || "${pipeline_status[0]}" -eq 141 ]]
+          [[ "$(wc -c <"$diff_path" | tr -d ' ')" -le 262144 ]]
+          record="$(git -C "$repository" -c core.hooksPath=/dev/null \
+            ls-tree "$HEAD_SHA" -- .github/workflows/release.yml)"
+          read -r candidate_mode candidate_type candidate_object candidate_name <<<"$record"
+          [[ "$candidate_type" == "blob" ]]
+          [[ "$candidate_name" == $'.github/workflows/release.yml' ]]
+          candidate_size="$(git -C "$repository" cat-file -s "$candidate_object")"
+          [[ "$candidate_size" =~ ^[0-9]+$ && "$candidate_size" -le 262144 ]]
+          git -C "$repository" cat-file blob "$candidate_object" >"$candidate_path"
+          node trusted-policy/scripts/anchored-policy.mjs \
+            "$BASE_SHA" "$HEAD_SHA" "$diff_path" "$candidate_mode" \
+            "$candidate_size" "$candidate_path" \
+            trusted-policy/.github/workflows/release.yml
